@@ -1,12 +1,28 @@
-[
-  {
-    "Username": "swapna880",
-    "Role": "admin",
-    "Status": "Skipped - Source repository owner"
-  },
-  {
-    "Username": "swapnakuntala",
-    "Role": "write",
-    "Status": "Skipped - Destination repository owner"
-  }
-]
+{
+  "SourceRepository": "swapna880/testing-app",
+  "DestinationRepository": "swapnakuntala/testing-app",
+  "SourceExportStatus": "Success",
+  "DestinationAccessStatus": "Verified",
+  "TotalSourceCollaborators": 2,
+  "SourceOwnerCount": 1,
+  "DestinationOwnerCount": 1,
+  "ExternalCollaborators": 0,
+  "ExternalMigrationStatus": "Not tested - Third account unavailable",
+  "Results": [
+    {
+      "SourceUsername": "swapna880",
+      "SourceRole": "admin",
+      "DestinationAccessFound": false,
+      "DestinationRole": "Not verified",
+      "Status": "Source owner - Not transferable as collaborator"
+    },
+    {
+      "SourceUsername": "swapnakuntala",
+      "SourceRole": "write",
+      "DestinationAccessFound": true,
+      "DestinationRole": "admin",
+      "Status": "Destination owner - Repository ownership verified"
+    }
+  ],
+  "Timestamp": "2026-11-08 18:49:02"
+}
