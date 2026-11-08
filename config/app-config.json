@@ -1,0 +1,7 @@
+{
+  "application": "testing-app",
+  "environment": "development",
+  "version": "1.0",
+  "monitoring": true,
+  "deployment": "enabled"
+}
