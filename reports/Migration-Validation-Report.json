@@ -1,0 +1,111 @@
+{
+  "SourceRepository": "swapna880/testing-app",
+  "DestinationRepository": "swapnakuntala/testing-app",
+  "Timestamp": "2026-11-08 18:04:13",
+  "TotalChecks": 20,
+  "Passed": 20,
+  "Failed": 0,
+  "OverallStatus": "Passed",
+  "Results": [
+    {
+      "Check": "Repository existence",
+      "Status": "Passed",
+      "Details": "Both repositories are accessible."
+    },
+    {
+      "Check": "Repository visibility",
+      "Status": "Passed",
+      "Details": "Visibility matches."
+    },
+    {
+      "Check": "Default branch",
+      "Status": "Passed",
+      "Details": "main"
+    },
+    {
+      "Check": "Setting: description",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: has_issues",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: has_projects",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: has_wiki",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: allow_squash_merge",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: allow_merge_commit",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: allow_rebase_merge",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: allow_auto_merge",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Setting: delete_branch_on_merge",
+      "Status": "Passed",
+      "Details": "Values match."
+    },
+    {
+      "Check": "Branch comparison",
+      "Status": "Passed",
+      "Details": "All branch names match."
+    },
+    {
+      "Check": "Branch SHA: refs/heads/develop",
+      "Status": "Passed",
+      "Details": "Commit SHA matches."
+    },
+    {
+      "Check": "Branch SHA: refs/heads/main",
+      "Status": "Passed",
+      "Details": "Commit SHA matches."
+    },
+    {
+      "Check": "Branch SHA: refs/heads/feature/login",
+      "Status": "Passed",
+      "Details": "Commit SHA matches."
+    },
+    {
+      "Check": "Tag comparison",
+      "Status": "Passed",
+      "Details": "All tag names match."
+    },
+    {
+      "Check": "Commit: refs/heads/develop",
+      "Status": "Passed",
+      "Details": "Commit IDs match."
+    },
+    {
+      "Check": "Commit: refs/heads/main",
+      "Status": "Passed",
+      "Details": "Commit IDs match."
+    },
+    {
+      "Check": "Commit: refs/heads/feature/login",
+      "Status": "Passed",
+      "Details": "Commit IDs match."
+    }
+  ]
+}

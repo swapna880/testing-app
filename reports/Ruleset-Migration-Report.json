@@ -1,0 +1,9 @@
+{
+  "SourceRepository": "swapna880/testing-app",
+  "DestinationRepository": "swapnakuntala/testing-app",
+  "ExportStatus": "Restricted",
+  "DestinationStatus": "Repository access verified",
+  "MigrationStatus": "Not migrated - GitHub plan restriction",
+  "Details": "GitHub plan or repository visibility restriction prevents ruleset export.",
+  "Timestamp": "2026-11-08 17:26:46"
+}

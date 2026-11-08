@@ -1,0 +1,27 @@
+[
+  {
+    "Item": "Repository",
+    "Status": "Success",
+    "Details": "Export completed"
+  },
+  {
+    "Item": "Branches",
+    "Status": "Success",
+    "Details": "Export completed"
+  },
+  {
+    "Item": "Tags",
+    "Status": "Success",
+    "Details": "Export completed"
+  },
+  {
+    "Item": "Collaborators",
+    "Status": "Success",
+    "Details": "Export completed"
+  },
+  {
+    "Item": "Rulesets",
+    "Status": "Restricted",
+    "Details": "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\n{\"message\":\"Upgrade to GitHub Pro or make this repository public to enable this feature.\",\"documentation_url\":\"https://docs.github.com/rest/repos/rules#get-all-repository-rulesets\",\"status\":\"403\"}"
+  }
+]

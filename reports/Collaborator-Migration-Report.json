@@ -1,0 +1,12 @@
+[
+  {
+    "Username": "swapna880",
+    "Role": "admin",
+    "Status": "Skipped - Source repository owner"
+  },
+  {
+    "Username": "swapnakuntala",
+    "Role": "write",
+    "Status": "Skipped - Destination repository owner"
+  }
+]
