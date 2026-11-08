@@ -1,9 +1,29 @@
 {
   "SourceRepository": "swapna880/testing-app",
   "DestinationRepository": "swapnakuntala/testing-app",
-  "ExportStatus": "Restricted",
+  "ExportStatus": "Success",
   "DestinationStatus": "Repository access verified",
-  "MigrationStatus": "Not migrated - GitHub plan restriction",
-  "Details": "GitHub plan or repository visibility restriction prevents ruleset export.",
-  "Timestamp": "2026-11-08 17:26:46"
+  "MigrationStatus": "Success",
+  "TotalRulesets": 2,
+  "Migrated": 0,
+  "AlreadyPresent": 2,
+  "Failed": 0,
+  "EnforcementPreserved": "Disabled",
+  "Results": [
+    {
+      "Name": "protect-develop",
+      "Status": "Already present",
+      "DestinationId": 26798350,
+      "Verification": "Passed",
+      "Details": "Configuration matches source. Enforcement preserved."
+    },
+    {
+      "Name": "protect-main",
+      "Status": "Already present",
+      "DestinationId": 26798295,
+      "Verification": "Passed",
+      "Details": "Configuration matches source. Enforcement preserved."
+    }
+  ],
+  "Timestamp": "2026-11-08 18:37:45"
 }
