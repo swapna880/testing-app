@@ -10,16 +10,24 @@ $ErrorActionPreference = "Stop"
 $ProjectPath = "C:\GitHub-Migration-POC"
 $MirrorPath = Join-Path $ProjectPath "$Repo-mirror.git"
 
-Write-Host "=========================================="
-Write-Host "GitHub Repository Migration"
-Write-Host "=========================================="
+$SourceUrl = "https://github.com/$SourceOwner/$Repo.git"
+$DestinationUrl = "https://github.com/$DestinationOwner/$Repo.git"
 
-# Step 1: Verify source account
-Write-Host "Verifying source account..."
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "       GitHub Repository Migration        " -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+
+# STEP 1: Verify source account
+Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
 
 gh auth switch --user $SourceOwner
 if ($LASTEXITCODE -ne 0) {
     throw "Could not switch to source account."
+}
+
+gh auth setup-git
+if ($LASTEXITCODE -ne 0) {
+    throw "Git authentication setup failed for source account."
 }
 
 $SourceUser = gh api user --jq .login
@@ -27,12 +35,29 @@ if ($LASTEXITCODE -ne 0 -or $SourceUser -ne $SourceOwner) {
     throw "Source account verification failed."
 }
 
-# Step 2: Verify destination account
-Write-Host "Verifying destination account..."
+Write-Host "Source account verified: $SourceUser" -ForegroundColor Green
+
+# STEP 2: Verify source repository access
+Write-Host "`nSTEP 2: Checking source repository access..." -ForegroundColor Yellow
+
+git ls-remote $SourceUrl | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Cannot access source repository."
+}
+
+Write-Host "Source repository access verified." -ForegroundColor Green
+
+# STEP 3: Verify destination account
+Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
 
 gh auth switch --user $DestinationOwner
 if ($LASTEXITCODE -ne 0) {
     throw "Could not switch to destination account."
+}
+
+gh auth setup-git
+if ($LASTEXITCODE -ne 0) {
+    throw "Git authentication setup failed for destination account."
 }
 
 $DestinationUser = gh api user --jq .login
@@ -40,41 +65,79 @@ if ($LASTEXITCODE -ne 0 -or $DestinationUser -ne $DestinationOwner) {
     throw "Destination account verification failed."
 }
 
-# Step 3: Confirm destination repository exists
-gh api "repos/$DestinationOwner/$Repo" --silent
+Write-Host "Destination account verified: $DestinationUser" -ForegroundColor Green
 
+# STEP 4: Verify destination repository exists
+Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
+
+gh api "repos/$DestinationOwner/$Repo" --silent
 if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository does not exist. Run Create-Repository.ps1 first."
+    throw "Destination repository does not exist or is inaccessible."
 }
 
-# Step 4: Mirror clone source repository
-Write-Host "Cloning source repository..."
+Write-Host "Destination repository verified." -ForegroundColor Green
+
+# STEP 5: Check destination is empty
+Write-Host "`nSTEP 5: Checking destination branches and tags..." -ForegroundColor Yellow
+
+$DestinationRefs = @(git ls-remote $DestinationUrl 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Cannot access destination repository through Git."
+}
+
+if ($DestinationRefs.Count -gt 0) {
+    throw "Destination is not empty. Migration stopped to prevent overwriting refs."
+}
+
+Write-Host "Destination repository is empty." -ForegroundColor Green
+
+# STEP 6: Check mirror directory
+Write-Host "`nSTEP 6: Checking local mirror directory..." -ForegroundColor Yellow
 
 if (Test-Path $MirrorPath) {
-    throw "Mirror folder already exists. Stop and inspect it before running again."
+    throw "Mirror directory already exists: $MirrorPath. Inspect it before retrying."
 }
 
-$SourceUrl = "https://github.com/$SourceOwner/$Repo.git"
+# STEP 7: Clone source repository as a mirror
+Write-Host "`nSTEP 7: Cloning source repository..." -ForegroundColor Yellow
+
+gh auth switch --user $SourceOwner
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not switch back to source account."
+}
+
+gh auth setup-git
+if ($LASTEXITCODE -ne 0) {
+    throw "Git authentication setup failed for source account."
+}
 
 git clone --mirror $SourceUrl $MirrorPath
-
 if ($LASTEXITCODE -ne 0) {
     throw "Source mirror clone failed."
 }
 
-# Step 5: Push mirror to destination
-Write-Host "Pushing repository history to destination..."
+Write-Host "Source repository cloned successfully." -ForegroundColor Green
 
-$DestinationUrl = "https://github.com/$DestinationOwner/$Repo.git"
+# STEP 8: Push mirror to destination
+Write-Host "`nSTEP 8: Pushing repository to destination..." -ForegroundColor Yellow
 
-git -C $MirrorPath push --mirror $DestinationUrl
-
+gh auth switch --user $DestinationOwner
 if ($LASTEXITCODE -ne 0) {
-    throw "Mirror push failed. Check destination access and Git credentials."
+    throw "Could not switch to destination account."
 }
 
-Write-Host "=========================================="
-Write-Host "Repository migration completed!"
+gh auth setup-git
+if ($LASTEXITCODE -ne 0) {
+    throw "Git authentication setup failed for destination account."
+}
+
+git -C $MirrorPath push --mirror $DestinationUrl
+if ($LASTEXITCODE -ne 0) {
+    throw "Mirror push failed. Review Git output before retrying."
+}
+
+Write-Host "`n==========================================" -ForegroundColor Green
+Write-Host "     Repository Migration Completed!      " -ForegroundColor Green
 Write-Host "Source: $SourceOwner/$Repo"
 Write-Host "Destination: $DestinationOwner/$Repo"
 Write-Host "==========================================" -ForegroundColor Green
