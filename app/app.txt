@@ -1,0 +1,5 @@
+Application Name: GitHub Migration Demo
+Environment: Development
+Application Status: Active
+Version: 1.0
+Purpose: Testing repository migration automation.
