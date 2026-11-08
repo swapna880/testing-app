@@ -31,24 +31,24 @@ gh api "repos/$DestinationOwner/$Repo" --silent 2>$null
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Repository already exists: $DestinationOwner/$Repo" -ForegroundColor Yellow
-    exit 0
 }
+else {
+    # Create a private repository
+    Write-Host "Creating destination repository..."
 
-# Create a private repository
-Write-Host "Creating destination repository..."
+    $Result = gh api user/repos `
+        -f name=$Repo `
+        -f description="$Description" `
+        -F private=true `
+        -F has_issues=true `
+        -F has_projects=true `
+        -F has_wiki=false `
+        --jq '{name: .name, full_name: .full_name, private: .private, html_url: .html_url}'
 
-$Result = gh api user/repos `
-    -f name=$Repo `
-    -f description="$Description" `
-    -F private=true `
-    -F has_issues=true `
-    -F has_projects=true `
-    -F has_wiki=false `
-    --jq '{name: .name, full_name: .full_name, private: .private, html_url: .html_url}' 
+    if ($LASTEXITCODE -ne 0) {
+        throw "Destination repository creation failed."
+    }
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository creation failed."
+    Write-Host $Result
+    Write-Host "Destination repository created successfully!" -ForegroundColor Green
 }
-
-Write-Host $Result
-Write-Host "Destination repository created successfully!" -ForegroundColor Green
