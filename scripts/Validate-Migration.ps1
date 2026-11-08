@@ -117,47 +117,80 @@ foreach ($Setting in $SettingNames) {
     }
 }
 
-# STEP 8: Compare Git branches and tags
+
+# STEP 8: Compare Git branches and tags, including SHA values
+
+function Get-GitRefs {
+    param(
+        [string]$Url,
+        [ValidateSet("heads", "tags")]
+        [string]$RefType
+    )
+
+    if ($RefType -eq "heads") {
+        $Output = @(git ls-remote --heads $Url)
+    }
+    else {
+        $Output = @(git ls-remote --tags --refs $Url)
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to retrieve $RefType from $Url"
+    }
+
+    $RefMap = @{}
+
+    foreach ($Line in $Output) {
+        if ($Line -match '^([0-9a-f]+)\s+(.+)$') {
+            $RefMap[$Matches[2]] = $Matches[1]
+        }
+    }
+
+    return $RefMap
+}
+
+# Retrieve source references
 gh auth switch --user $SourceOwner
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to switch to source account."
+}
+
 gh auth setup-git
 
-$SourceBranches = @(
-    git ls-remote --heads "https://github.com/$SourceOwner/$Repo.git" |
-    ForEach-Object { ($_ -split "refs/heads/")[-1] }
-)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to retrieve source branches."
-}
+$SourceBranchRefs = Get-GitRefs `
+    -Url "https://github.com/$SourceOwner/$Repo.git" `
+    -RefType "heads"
 
-$SourceTags = @(
-    git ls-remote --tags --refs "https://github.com/$SourceOwner/$Repo.git" |
-    ForEach-Object { ($_ -split "refs/tags/")[-1] }
-)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to retrieve source tags."
-}
+$SourceTagRefs = Get-GitRefs `
+    -Url "https://github.com/$SourceOwner/$Repo.git" `
+    -RefType "tags"
 
+# Retrieve destination references
 gh auth switch --user $DestinationOwner
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to switch to destination account."
+}
+
 gh auth setup-git
 
-$DestinationBranches = @(
-    git ls-remote --heads "https://github.com/$DestinationOwner/$Repo.git" |
-    ForEach-Object { ($_ -split "refs/heads/")[-1] }
-)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to retrieve destination branches."
-}
+$DestinationBranchRefs = Get-GitRefs `
+    -Url "https://github.com/$DestinationOwner/$Repo.git" `
+    -RefType "heads"
 
-$DestinationTags = @(
-    git ls-remote --tags --refs "https://github.com/$DestinationOwner/$Repo.git" |
-    ForEach-Object { ($_ -split "refs/tags/")[-1] }
-)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to retrieve destination tags."
-}
+$DestinationTagRefs = Get-GitRefs `
+    -Url "https://github.com/$DestinationOwner/$Repo.git" `
+    -RefType "tags"
 
-$MissingBranches = @($SourceBranches | Where-Object { $_ -notin $DestinationBranches })
-$ExtraBranches = @($DestinationBranches | Where-Object { $_ -notin $SourceBranches })
+# Compare branch names
+$MissingBranches = @(
+    $SourceBranchRefs.Keys |
+    Where-Object { $_ -notin $DestinationBranchRefs.Keys }
+)
+
+$ExtraBranches = @(
+    $DestinationBranchRefs.Keys |
+    Where-Object { $_ -notin $SourceBranchRefs.Keys }
+)
 
 if ($MissingBranches.Count -eq 0 -and $ExtraBranches.Count -eq 0) {
     Add-ValidationResult "Branch comparison" "Passed" "All branch names match."
@@ -166,8 +199,28 @@ else {
     Add-ValidationResult "Branch comparison" "Failed" "Missing: $($MissingBranches -join ', '); Extra: $($ExtraBranches -join ', ')"
 }
 
-$MissingTags = @($SourceTags | Where-Object { $_ -notin $DestinationTags })
-$ExtraTags = @($DestinationTags | Where-Object { $_ -notin $SourceTags })
+# Compare branch SHA values
+foreach ($Ref in $SourceBranchRefs.Keys) {
+    if ($DestinationBranchRefs.ContainsKey($Ref) -and
+        $SourceBranchRefs[$Ref] -eq $DestinationBranchRefs[$Ref]) {
+
+        Add-ValidationResult "Branch SHA: $Ref" "Passed" "Commit SHA matches."
+    }
+    else {
+        Add-ValidationResult "Branch SHA: $Ref" "Failed" "Commit SHA differs or branch is missing."
+    }
+}
+
+# Compare tag names
+$MissingTags = @(
+    $SourceTagRefs.Keys |
+    Where-Object { $_ -notin $DestinationTagRefs.Keys }
+)
+
+$ExtraTags = @(
+    $DestinationTagRefs.Keys |
+    Where-Object { $_ -notin $SourceTagRefs.Keys }
+)
 
 if ($MissingTags.Count -eq 0 -and $ExtraTags.Count -eq 0) {
     Add-ValidationResult "Tag comparison" "Passed" "All tag names match."
@@ -176,8 +229,20 @@ else {
     Add-ValidationResult "Tag comparison" "Failed" "Missing: $($MissingTags -join ', '); Extra: $($ExtraTags -join ', ')"
 }
 
+# Compare tag SHA values
+foreach ($Ref in $SourceTagRefs.Keys) {
+    if ($DestinationTagRefs.ContainsKey($Ref) -and
+        $SourceTagRefs[$Ref] -eq $DestinationTagRefs[$Ref]) {
+
+        Add-ValidationResult "Tag SHA: $Ref" "Passed" "Tag object SHA matches."
+    }
+    else {
+        Add-ValidationResult "Tag SHA: $Ref" "Failed" "Tag object SHA differs or tag is missing."
+    }
+}
+
 # STEP 9: Compare commit IDs for each branch
-foreach ($Branch in $SourceBranches) {
+foreach ($Branch in $SourceBranchRefs.Keys) {
 
     $SourceCommit = git ls-remote "https://github.com/$SourceOwner/$Repo.git" "refs/heads/$Branch" |
         ForEach-Object { ($_ -split "\s+")[0] }
@@ -227,3 +292,12 @@ Write-Host "Failed: $Failed"
 Write-Host "Overall: $($FinalReport.OverallStatus)"
 Write-Host "Report: $ReportPath"
 Write-Host "==========================================" -ForegroundColor Cyan
+
+if ($Failed -gt 0) {
+    Write-Host "Migration validation failed. Review the JSON report." -ForegroundColor Red
+    exit 1
+}
+else {
+    Write-Host "All migration validation checks passed." -ForegroundColor Green
+    exit 0
+}
