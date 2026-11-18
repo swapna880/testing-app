@@ -1,99 +1,225 @@
 
 param(
     [string]$SourceOwner = "swapna880",
+    [string]$SourceRepo = "testing-app",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app"
+    [string]$DestinationRepo = "migration-automation-test",
+    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [SecureString]$SourceToken,
+    [SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "C:\GitHub-Migration-POC"
-$SettingsFile = Join-Path $ProjectPath "config\repository-settings.json"
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " Repository Configuration Migration" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+function Convert-SecureToken {
+    param([SecureString]$SecureValue)
 
-# STEP 1: Authenticate to source account
-Write-Host "`nChecking source account..." -ForegroundColor Yellow
+    if ($null -eq $SecureValue) {
+        throw "A required GitHub token was not supplied."
+    }
 
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch to source account."
+    $Bstr = [IntPtr]::Zero
+    try {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
 }
 
-$SourceUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $SourceUser -ne $SourceOwner) {
-    throw "Source account verification failed."
+function Get-GitHubHeaders {
+    param([string]$Token)
+
+    return @{
+        Authorization = "Bearer $Token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
 }
 
-# STEP 2: Export source repository settings
-Write-Host "Reading source repository settings..." -ForegroundColor Yellow
+function Invoke-GitHubRequest {
+    param(
+        [string]$Uri,
+        [hashtable]$Headers,
+        [string]$Method = "GET",
+        [object]$Body
+    )
 
-$SourceJson = gh api "repos/$SourceOwner/$Repo"
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not read source repository settings."
+    $Parameters = @{
+        Uri = $Uri
+        Headers = $Headers
+        Method = $Method
+        ErrorAction = "Stop"
+    }
+
+    if ($null -ne $Body) {
+        $Parameters.Body = ConvertTo-Json -InputObject $Body -Depth 15
+        $Parameters.ContentType = "application/json"
+    }
+
+    return Invoke-RestMethod @Parameters
 }
 
-$SourceSettings = $SourceJson | ConvertFrom-Json
+try {
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host " Repository Configuration Migration" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
 
-# Select settings supported by the repository update API
-$Settings = [ordered]@{
-    description = $SourceSettings.description
-    homepage = $SourceSettings.homepage
-    has_issues = $SourceSettings.has_issues
-    has_projects = $SourceSettings.has_projects
-    has_wiki = $SourceSettings.has_wiki
-    allow_squash_merge = $SourceSettings.allow_squash_merge
-    allow_merge_commit = $SourceSettings.allow_merge_commit
-    allow_rebase_merge = $SourceSettings.allow_rebase_merge
-    allow_auto_merge = $SourceSettings.allow_auto_merge
-    delete_branch_on_merge = $SourceSettings.delete_branch_on_merge
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    }
+
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    }
+
+    $SourcePlainToken = Convert-SecureToken $SourceToken
+    $DestinationPlainToken = Convert-SecureToken $DestinationToken
+
+    $SourceHeaders = Get-GitHubHeaders $SourcePlainToken
+    $DestinationHeaders = Get-GitHubHeaders $DestinationPlainToken
+
+    Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
+
+    $SourceUser = Invoke-GitHubRequest `
+        -Uri "https://api.github.com/user" `
+        -Headers $SourceHeaders
+
+    if ($SourceUser.login -ne $SourceOwner) {
+        throw "Source token belongs to '$($SourceUser.login)', not '$SourceOwner'."
+    }
+
+    Write-Host "Source account verified: $($SourceUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 2: Reading source repository settings..." -ForegroundColor Yellow
+
+    $SourceSettings = Invoke-GitHubRequest `
+        -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo" `
+        -Headers $SourceHeaders
+
+    $Settings = [ordered]@{
+        description = $SourceSettings.description
+        homepage = $SourceSettings.homepage
+        has_issues = $SourceSettings.has_issues
+        has_projects = $SourceSettings.has_projects
+        has_wiki = $SourceSettings.has_wiki
+        allow_squash_merge = $SourceSettings.allow_squash_merge
+        allow_merge_commit = $SourceSettings.allow_merge_commit
+        allow_rebase_merge = $SourceSettings.allow_rebase_merge
+        allow_auto_merge = $SourceSettings.allow_auto_merge
+        delete_branch_on_merge = $SourceSettings.delete_branch_on_merge
+    }
+
+    $SettingsDirectory = Join-Path $ProjectPath "config"
+    New-Item -ItemType Directory -Path $SettingsDirectory -Force | Out-Null
+
+    $SettingsFile = Join-Path $SettingsDirectory "repository-settings.json"
+
+    $Settings |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -Path $SettingsFile -Encoding utf8
+
+    Write-Host "Source settings exported to: $SettingsFile" -ForegroundColor Green
+
+    Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
+
+    $DestinationUser = Invoke-GitHubRequest `
+        -Uri "https://api.github.com/user" `
+        -Headers $DestinationHeaders
+
+    if ($DestinationUser.login -ne $DestinationOwner) {
+        throw "Destination token belongs to '$($DestinationUser.login)', not '$DestinationOwner'."
+    }
+
+    Write-Host "Destination account verified: $($DestinationUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
+
+    $DestinationUrl = "https://api.github.com/repos/$DestinationOwner/$DestinationRepo"
+
+    $null = Invoke-GitHubRequest `
+        -Uri $DestinationUrl `
+        -Headers $DestinationHeaders
+
+    Write-Host "Destination repository verified." -ForegroundColor Green
+
+    Write-Host "`nSTEP 5: Applying repository settings..." -ForegroundColor Yellow
+
+    $null = Invoke-GitHubRequest `
+        -Uri $DestinationUrl `
+        -Headers $DestinationHeaders `
+        -Method PATCH `
+        -Body $Settings
+
+    Write-Host "Repository settings update request completed." -ForegroundColor Green
+
+    Write-Host "`nSTEP 6: Verifying destination settings..." -ForegroundColor Yellow
+
+    $UpdatedSettings = Invoke-GitHubRequest `
+        -Uri $DestinationUrl `
+        -Headers $DestinationHeaders
+
+    $Verification = [ordered]@{
+        description = $UpdatedSettings.description
+        homepage = $UpdatedSettings.homepage
+        has_issues = $UpdatedSettings.has_issues
+        has_projects = $UpdatedSettings.has_projects
+        has_wiki = $UpdatedSettings.has_wiki
+        allow_squash_merge = $UpdatedSettings.allow_squash_merge
+        allow_merge_commit = $UpdatedSettings.allow_merge_commit
+        allow_rebase_merge = $UpdatedSettings.allow_rebase_merge
+        allow_auto_merge = $UpdatedSettings.allow_auto_merge
+        delete_branch_on_merge = $UpdatedSettings.delete_branch_on_merge
+    }
+
+    $VerificationFile = Join-Path $SettingsDirectory "destination-settings-verification.json"
+
+    $Verification |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -Path $VerificationFile -Encoding utf8
+
+    $Differences = @()
+
+    foreach ($Key in $Settings.Keys) {
+        if ([string]($Settings[$Key]) -cne [string]($Verification[$Key])) {
+            $Differences += $Key
+        }
+    }
+
+    if ($Differences.Count -gt 0) {
+        throw "Settings verification mismatch: $($Differences -join ', ')"
+    }
+
+    Write-Host "`n==========================================" -ForegroundColor Green
+    Write-Host " CONFIGURATION MIGRATION SUCCESSFUL" -ForegroundColor Green
+    Write-Host "==========================================" -ForegroundColor Green
+    Write-Host "Source: $SourceOwner/$SourceRepo"
+    Write-Host "Destination: $DestinationOwner/$DestinationRepo"
+    Write-Host "Settings verified: $($Settings.Count)"
+    Write-Host "Verification file: $VerificationFile"
 }
-
-New-Item -ItemType Directory -Path (Split-Path $SettingsFile) -Force | Out-Null
-
-$Settings | ConvertTo-Json -Depth 5 |
-    Set-Content -Path $SettingsFile -Encoding utf8
-
-Write-Host "Source settings exported successfully." -ForegroundColor Green
-
-# STEP 3: Switch to destination account
-Write-Host "`nChecking destination account..." -ForegroundColor Yellow
-
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch to destination account."
+catch {
+    Write-Host "`nCONFIGURATION MIGRATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
+finally {
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
 
-$DestinationUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $DestinationUser -ne $DestinationOwner) {
-    throw "Destination account verification failed."
+    if ($SourceToken) {
+        $SourceToken.Dispose()
+    }
+
+    if ($DestinationToken) {
+        $DestinationToken.Dispose()
+    }
+
+    [GC]::Collect()
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }
-
-# STEP 4: Verify destination repository
-gh api "repos/$DestinationOwner/$Repo" --silent
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository does not exist or is inaccessible."
-}
-
-# STEP 5: Apply settings to destination
-Write-Host "`nApplying repository settings..." -ForegroundColor Yellow
-
-gh api -X PATCH "repos/$DestinationOwner/$Repo" --input $SettingsFile
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to apply repository settings."
-}
-
-Write-Host "`nRepository settings applied successfully." -ForegroundColor Green
-
-# STEP 6: Verify selected settings
-$Result = gh api "repos/$DestinationOwner/$Repo" `
-    --jq '{description: .description, has_issues: .has_issues, has_projects: .has_projects, has_wiki: .has_wiki, allow_squash_merge: .allow_squash_merge, allow_merge_commit: .allow_merge_commit, allow_rebase_merge: .allow_rebase_merge, allow_auto_merge: .allow_auto_merge, delete_branch_on_merge: .delete_branch_on_merge}'
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination settings verification failed."
-}
-
-Write-Host $Result
-Write-Host "`nConfiguration migration completed." -ForegroundColor Green

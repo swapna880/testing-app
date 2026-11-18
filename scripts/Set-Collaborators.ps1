@@ -1,178 +1,256 @@
 
-
 param(
     [string]$SourceOwner = "swapna880",
+    [string]$SourceRepo = "testing-app",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app"
+    [string]$DestinationRepo = "migration-automation-test",
+    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [SecureString]$SourceToken,
+    [SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "C:\GitHub-Migration-POC"
 $ExportPath = Join-Path $ProjectPath "exports\collaborators.json"
 $ReportPath = Join-Path $ProjectPath "reports\Collaborator-Migration-Report.json"
 
-New-Item -ItemType Directory -Force -Path (Split-Path $ExportPath) | Out-Null
-New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
 
-$Results = @()
+function Convert-SecureToken {
+    param([SecureString]$SecureValue)
 
-$Report = [ordered]@{
-    SourceRepository = "$SourceOwner/$Repo"
-    DestinationRepository = "$DestinationOwner/$Repo"
-    SourceExportStatus = "Pending"
-    DestinationAccessStatus = "Pending"
-    TotalSourceCollaborators = 0
-    SourceOwnerCount = 0
-    DestinationOwnerCount = 0
-    ExternalCollaborators = 0
-    ExternalMigrationStatus = "Not tested - Third account unavailable"
-    Results = @()
-    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    if ($null -eq $SecureValue) {
+        throw "A required GitHub token was not supplied."
+    }
+
+    $Bstr = [IntPtr]::Zero
+
+    try {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
 }
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " Collaborator Migration Assessment" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+function Get-GitHubHeaders {
+    param([string]$Token)
 
-# STEP 1: Verify source account
-Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
-
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Source authentication failed."
+    return @{
+        Authorization = "Bearer $Token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
 }
 
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser.Trim() -ne $SourceOwner) {
-    throw "Source account verification failed."
+function Get-GitHubPaginatedData {
+    param(
+        [string]$Uri,
+        [hashtable]$Headers
+    )
+
+    $AllResults = @()
+    $Page = 1
+
+    do {
+        $Separator = if ($Uri.Contains("?")) { "&" } else { "?" }
+        $PageUri = "${Uri}${Separator}per_page=100&page=$Page"
+
+        $Response = Invoke-RestMethod `
+            -Uri $PageUri `
+            -Headers $Headers `
+            -Method Get `
+            -ErrorAction Stop
+
+        $AllResults += @($Response)
+        $Page++
+
+    } while (@($Response).Count -eq 100)
+
+    return ,$AllResults
 }
 
-# STEP 2: Export source collaborators
-Write-Host "`nSTEP 2: Exporting source collaborators..." -ForegroundColor Yellow
+try {
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host " Collaborator Migration Assessment" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
 
-$CollaboratorOutput = gh api "repos/$SourceOwner/$Repo/collaborators?affiliation=direct" 2>&1
+    New-Item -ItemType Directory -Force -Path (Split-Path $ExportPath) | Out-Null
+    New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Collaborator export failed: $($CollaboratorOutput -join ' ')"
-}
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    }
 
-$Collaborators = @($CollaboratorOutput | ConvertFrom-Json)
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    }
 
-$Export = @(
-    foreach ($Collaborator in $Collaborators) {
-        [PSCustomObject]@{
-            SourceUsername = $Collaborator.login
+    $SourcePlainToken = Convert-SecureToken $SourceToken
+    $DestinationPlainToken = Convert-SecureToken $DestinationToken
+
+    $SourceHeaders = Get-GitHubHeaders $SourcePlainToken
+    $DestinationHeaders = Get-GitHubHeaders $DestinationPlainToken
+
+    $Report = [ordered]@{
+        SourceRepository = "$SourceOwner/$SourceRepo"
+        DestinationRepository = "$DestinationOwner/$DestinationRepo"
+        SourceExportStatus = "Pending"
+        DestinationAccessStatus = "Pending"
+        TotalSourceCollaborators = 0
+        SourceOwnerCount = 0
+        DestinationOwnerCount = 0
+        ExternalCollaborators = 0
+        ExternalMigrationStatus = "Assessment only - external invitations not performed"
+        Results = @()
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+
+    Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
+
+    $SourceUser = Invoke-RestMethod `
+        -Uri "https://api.github.com/user" `
+        -Headers $SourceHeaders
+
+    if ($SourceUser.login -ne $SourceOwner) {
+        throw "Source token belongs to '$($SourceUser.login)', not '$SourceOwner'."
+    }
+
+    Write-Host "Source account verified: $($SourceUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 2: Exporting source collaborators..." -ForegroundColor Yellow
+
+    $SourceCollaborators = Get-GitHubPaginatedData `
+        -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo/collaborators?affiliation=direct" `
+        -Headers $SourceHeaders
+
+    $Export = @(
+        foreach ($Collaborator in $SourceCollaborators) {
+            [PSCustomObject]@{
+                SourceUsername = $Collaborator.login
+                SourceRole = $Collaborator.role_name
+                Permissions = $Collaborator.permissions
+            }
+        }
+    )
+
+    $Export |
+        ConvertTo-Json -Depth 15 |
+        Set-Content -Path $ExportPath -Encoding utf8
+
+    $Report.SourceExportStatus = "Success"
+    $Report.TotalSourceCollaborators = $SourceCollaborators.Count
+
+    Write-Host "Exported $($SourceCollaborators.Count) collaborator records." -ForegroundColor Green
+    Write-Host "Export file: $ExportPath"
+
+    Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
+
+    $DestinationUser = Invoke-RestMethod `
+        -Uri "https://api.github.com/user" `
+        -Headers $DestinationHeaders
+
+    if ($DestinationUser.login -ne $DestinationOwner) {
+        throw "Destination token belongs to '$($DestinationUser.login)', not '$DestinationOwner'."
+    }
+
+    Write-Host "Destination account verified: $($DestinationUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
+
+    $null = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo" `
+        -Headers $DestinationHeaders
+
+    $Report.DestinationAccessStatus = "Verified"
+
+    Write-Host "Destination repository access verified." -ForegroundColor Green
+
+    Write-Host "`nSTEP 5: Checking destination collaborators..." -ForegroundColor Yellow
+
+    $DestinationCollaborators = Get-GitHubPaginatedData `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/collaborators?affiliation=direct" `
+        -Headers $DestinationHeaders
+
+    $Results = @()
+
+    foreach ($Collaborator in $SourceCollaborators) {
+
+        $Username = $Collaborator.login
+
+        $DestinationMatch = $DestinationCollaborators |
+            Where-Object { $_.login -eq $Username } |
+            Select-Object -First 1
+
+        if ($Username -eq $SourceOwner) {
+            $Status = "Source owner - Not transferable as collaborator"
+            $Report.SourceOwnerCount++
+        }
+        elseif ($Username -eq $DestinationOwner) {
+            $Status = "Destination owner - Ownership verified"
+            $Report.DestinationOwnerCount++
+        }
+        elseif ($DestinationMatch) {
+            $Status = "Already has destination access"
+        }
+        else {
+            $Status = "Not migrated - External account mapping and invitation required"
+            $Report.ExternalCollaborators++
+        }
+
+        $Results += [PSCustomObject]@{
+            SourceUsername = $Username
             SourceRole = $Collaborator.role_name
-            Permissions = $Collaborator.permissions
+            DestinationAccessFound = [bool]$DestinationMatch
+            DestinationRole = if ($DestinationMatch) {
+                $DestinationMatch.role_name
+            } else {
+                "Not verified"
+            }
+            Status = $Status
         }
+
+        Write-Host "$Username : $Status"
     }
-)
 
-$Export | ConvertTo-Json -Depth 15 |
-    Set-Content -Path $ExportPath -Encoding utf8
+    $Report.Results = $Results
+    $Report.Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-$Report.SourceExportStatus = "Success"
-$Report.TotalSourceCollaborators = $Collaborators.Count
+    $Report |
+        ConvertTo-Json -Depth 15 |
+        Set-Content -Path $ReportPath -Encoding utf8
 
-Write-Host "Exported $($Collaborators.Count) collaborator records." -ForegroundColor Green
-
-# STEP 3: Verify destination account
-Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
-
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination authentication failed."
+    Write-Host "`n==========================================" -ForegroundColor Green
+    Write-Host " COLLABORATOR ASSESSMENT COMPLETED" -ForegroundColor Green
+    Write-Host "==========================================" -ForegroundColor Green
+    Write-Host "Source collaborators: $($Report.TotalSourceCollaborators)"
+    Write-Host "Source owner: $($Report.SourceOwnerCount)"
+    Write-Host "Destination owner: $($Report.DestinationOwnerCount)"
+    Write-Host "External collaborators: $($Report.ExternalCollaborators)"
+    Write-Host "External migration: $($Report.ExternalMigrationStatus)"
+    Write-Host "Export: $ExportPath"
+    Write-Host "Report: $ReportPath"
 }
-
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser.Trim() -ne $DestinationOwner) {
-    throw "Destination authentication verification failed."
+catch {
+    Write-Host "`nCOLLABORATOR ASSESSMENT FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
+finally {
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
 
-# STEP 4: Verify destination repository access
-Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
+    if ($SourceToken) {
+        $SourceToken.Dispose()
+    }
 
-$DestinationRepo = gh api "repos/$DestinationOwner/$Repo" 2>&1
+    if ($DestinationToken) {
+        $DestinationToken.Dispose()
+    }
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository access failed."
+    [GC]::Collect()
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }
-
-$Report.DestinationAccessStatus = "Verified"
-
-# STEP 5: Check destination collaborator access
-Write-Host "`nSTEP 5: Checking destination collaborator access..." -ForegroundColor Yellow
-
-$DestinationOutput = gh api "repos/$DestinationOwner/$Repo/collaborators?affiliation=direct" 2>&1
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not retrieve destination collaborator list."
-}
-
-$DestinationCollaborators = @($DestinationOutput | ConvertFrom-Json)
-
-foreach ($Collaborator in $Collaborators) {
-
-    $Username = $Collaborator.login
-    $DestinationUser = $DestinationCollaborators |
-        Where-Object { $_.login -eq $Username } |
-        Select-Object -First 1
-
-    if ($Username -eq $SourceOwner) {
-
-        $Status = "Source owner - Not transferable as collaborator"
-
-        $Report.SourceOwnerCount++
-    }
-    elseif ($Username -eq $DestinationOwner) {
-
-        $Status = "Destination owner - Repository ownership verified"
-
-        $Report.DestinationOwnerCount++
-    }
-    elseif ($DestinationUser) {
-
-        $Status = "Already has destination access"
-
-    }
-    else {
-
-        $Status = "Not migrated - External account mapping and testing required"
-
-        $Report.ExternalCollaborators++
-    }
-
-    $Results += [PSCustomObject]@{
-        SourceUsername = $Username
-        SourceRole = $Collaborator.role_name
-        DestinationAccessFound = [bool]$DestinationUser
-        DestinationRole = if ($DestinationUser) {
-            $DestinationUser.role_name
-        } else {
-            "Not verified"
-        }
-        Status = $Status
-    }
-
-    Write-Host "$Username : $Status"
-}
-
-# STEP 6: Generate report
-$Report.Results = $Results
-$Report.Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-
-$Report |
-    ConvertTo-Json -Depth 15 |
-    Set-Content -Path $ReportPath -Encoding utf8
-
-Write-Host "`n==========================================" -ForegroundColor Cyan
-Write-Host " COLLABORATOR ASSESSMENT SUMMARY" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "Source collaborators: $($Report.TotalSourceCollaborators)"
-Write-Host "Source owner: $($Report.SourceOwnerCount)"
-Write-Host "Destination owner: $($Report.DestinationOwnerCount)"
-Write-Host "External collaborators: $($Report.ExternalCollaborators)"
-Write-Host "External migration: $($Report.ExternalMigrationStatus)"
-Write-Host "Report: $ReportPath"
-Write-Host "==========================================" -ForegroundColor Cyan

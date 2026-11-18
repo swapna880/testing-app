@@ -2,142 +2,258 @@
 param(
     [string]$SourceOwner = "swapna880",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app"
+    [string]$Repo = "migration-automation-test",
+    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [SecureString]$SourceToken,
+    [SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "C:\GitHub-Migration-POC"
 $MirrorPath = Join-Path $ProjectPath "$Repo-mirror.git"
-
-$SourceUrl = "https://github.com/$SourceOwner/$Repo.git"
+$SourceUrl = "https://github.com/$SourceOwner/testing-app.git"
 $DestinationUrl = "https://github.com/$DestinationOwner/$Repo.git"
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "       GitHub Repository Migration        " -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
+$SourceBstr = [IntPtr]::Zero
+$DestinationBstr = [IntPtr]::Zero
 
-# STEP 1: Verify source account
-Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
+function Convert-SecureTokenToPlainText {
+    param([SecureString]$SecureValue)
 
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch to source account."
+    if ($null -eq $SecureValue) {
+        throw "A required token was not supplied."
+    }
+
+    $Bstr = [IntPtr]::Zero
+
+    try {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
 }
 
-gh auth setup-git
-if ($LASTEXITCODE -ne 0) {
-    throw "Git authentication setup failed for source account."
+function Get-GitAuthorizationHeader {
+    param([string]$Token)
+
+    $Bytes = [Text.Encoding]::UTF8.GetBytes("x-access-token:$Token")
+    $Encoded = [Convert]::ToBase64String($Bytes)
+
+    return "AUTHORIZATION: basic $Encoded"
 }
 
-$SourceUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $SourceUser -ne $SourceOwner) {
-    throw "Source account verification failed."
+function Invoke-GitWithToken {
+    param(
+        [string[]]$GitArguments,
+        [string]$Token
+    )
+
+    $Header = Get-GitAuthorizationHeader -Token $Token
+
+    & git -c "http.extraheader=$Header" @GitArguments
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git command failed. Review the Git output above."
+    }
 }
 
-Write-Host "Source account verified: $SourceUser" -ForegroundColor Green
+function Test-GitHubIdentity {
+    param(
+        [string]$Token,
+        [string]$ExpectedOwner,
+        [string]$AccountLabel
+    )
 
-# STEP 2: Verify source repository access
-Write-Host "`nSTEP 2: Checking source repository access..." -ForegroundColor Yellow
+    $Headers = @{
+        Authorization = "Bearer $Token"
+        Accept        = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
 
-git ls-remote $SourceUrl | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Cannot access source repository."
+    $User = Invoke-RestMethod `
+        -Uri "https://api.github.com/user" `
+        -Headers $Headers `
+        -Method Get
+
+    if ($User.login -ne $ExpectedOwner) {
+        throw "$AccountLabel token belongs to '$($User.login)', not '$ExpectedOwner'."
+    }
+
+    Write-Host "$AccountLabel account verified: $($User.login)" -ForegroundColor Green
 }
 
-Write-Host "Source repository access verified." -ForegroundColor Green
+try {
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "       GitHub Repository Migration        " -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
 
-# STEP 3: Verify destination account
-Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Git is not installed or is not available in PATH."
+    }
 
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch to destination account."
+    if (-not (Test-Path $ProjectPath)) {
+        throw "Project directory does not exist: $ProjectPath"
+    }
+
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    }
+
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    }
+
+    $SourcePlainToken = Convert-SecureTokenToPlainText $SourceToken
+    $DestinationPlainToken = Convert-SecureTokenToPlainText $DestinationToken
+
+    Write-Host "`nSTEP 1: Verifying GitHub accounts..." -ForegroundColor Yellow
+
+    Test-GitHubIdentity -Token $SourcePlainToken `
+        -ExpectedOwner $SourceOwner -AccountLabel "Source"
+
+    Test-GitHubIdentity -Token $DestinationPlainToken `
+        -ExpectedOwner $DestinationOwner -AccountLabel "Destination"
+
+    Write-Host "`nSTEP 2: Checking source repository..." -ForegroundColor Yellow
+
+    $SourceHeaders = @{
+        Authorization = "Bearer $SourcePlainToken"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+
+    $SourceRepository = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/$SourceOwner/testing-app" `
+        -Headers $SourceHeaders `
+        -Method Get
+
+    Write-Host "Source repository verified: $($SourceRepository.full_name)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 3: Checking destination repository..." -ForegroundColor Yellow
+
+    $DestinationHeaders = @{
+        Authorization = "Bearer $DestinationPlainToken"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+
+    $DestinationRepository = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$Repo" `
+        -Headers $DestinationHeaders `
+        -Method Get
+
+    Write-Host "Destination repository verified: $($DestinationRepository.full_name)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 4: Checking destination Git references..." -ForegroundColor Yellow
+
+    & git ls-remote --refs -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" $DestinationUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot access destination repository through Git."
+    }
+
+    $DestinationRefOutput = & git -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" ls-remote --refs $DestinationUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not verify destination references."
+    }
+
+    if ($DestinationRefOutput) {
+        throw "Destination is not empty. Migration stopped to prevent overwriting existing references."
+    }
+
+    Write-Host "Destination has no Git references." -ForegroundColor Green
+
+    Write-Host "`nSTEP 5: Checking local mirror directory..." -ForegroundColor Yellow
+
+    if (Test-Path $MirrorPath) {
+        throw "Mirror directory already exists: $MirrorPath. Inspect it before retrying."
+    }
+
+    Write-Host "`nSTEP 6: Cloning source repository as a mirror..." -ForegroundColor Yellow
+
+    Invoke-GitWithToken -Token $SourcePlainToken -GitArguments @(
+        "clone", "--mirror", $SourceUrl, $MirrorPath
+    )
+
+    Write-Host "Source mirror clone completed." -ForegroundColor Green
+
+    Write-Host "`nSTEP 7: Pushing mirror to destination..." -ForegroundColor Yellow
+
+    Invoke-GitWithToken -Token $DestinationPlainToken -GitArguments @(
+        "-C", $MirrorPath, "push", "--mirror", $DestinationUrl
+    )
+
+    Write-Host "Mirror push completed." -ForegroundColor Green
+
+    Write-Host "`nSTEP 8: Verifying destination references..." -ForegroundColor Yellow
+
+    $SourceRefs = & git -c "http.extraheader=$(Get-GitAuthorizationHeader $SourcePlainToken)" ls-remote --refs $SourceUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not retrieve source references for final verification."
+    }
+
+    $DestinationRefs = & git -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" ls-remote --refs $DestinationUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not retrieve destination references for final verification."
+    }
+
+    $SourceRefMap = @{}
+    foreach ($Ref in $SourceRefs) {
+        $Parts = $Ref -split "\s+", 2
+        if ($Parts.Count -eq 2) {
+            $SourceRefMap[$Parts[1]] = $Parts[0]
+        }
+    }
+
+    $DestinationRefMap = @{}
+    foreach ($Ref in $DestinationRefs) {
+        $Parts = $Ref -split "\s+", 2
+        if ($Parts.Count -eq 2) {
+            $DestinationRefMap[$Parts[1]] = $Parts[0]
+        }
+    }
+
+    if ($SourceRefMap.Count -ne $DestinationRefMap.Count) {
+        throw "Reference count mismatch. Source: $($SourceRefMap.Count), Destination: $($DestinationRefMap.Count)"
+    }
+
+    foreach ($RefName in $SourceRefMap.Keys) {
+        if (-not $DestinationRefMap.ContainsKey($RefName) -or
+            $SourceRefMap[$RefName] -ne $DestinationRefMap[$RefName]) {
+            throw "Reference verification failed for: $RefName"
+        }
+    }
+
+    Write-Host "`n==========================================" -ForegroundColor Green
+    Write-Host "       REPOSITORY MIGRATION SUCCESS       " -ForegroundColor Green
+    Write-Host "==========================================" -ForegroundColor Green
+    Write-Host "Source: $SourceOwner/testing-app"
+    Write-Host "Destination: $DestinationOwner/$Repo"
+    Write-Host "Verified references: $($SourceRefMap.Count)"
+    Write-Host "Reference validation: PASSED"
+    Write-Host "Mirror folder: $MirrorPath"
 }
-
-gh auth setup-git
-if ($LASTEXITCODE -ne 0) {
-    throw "Git authentication setup failed for destination account."
+catch {
+    Write-Host "`nMIGRATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
+finally {
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
 
-$DestinationUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $DestinationUser -ne $DestinationOwner) {
-    throw "Destination account verification failed."
+    if ($SourceToken) {
+        $SourceToken.Dispose()
+    }
+
+    if ($DestinationToken) {
+        $DestinationToken.Dispose()
+    }
+
+    [GC]::Collect()
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }
-
-Write-Host "Destination account verified: $DestinationUser" -ForegroundColor Green
-
-# STEP 4: Verify destination repository exists
-Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
-
-gh api "repos/$DestinationOwner/$Repo" --silent
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository does not exist or is inaccessible."
-}
-
-Write-Host "Destination repository verified." -ForegroundColor Green
-
-# STEP 5: Check destination is empty
-Write-Host "`nSTEP 5: Checking destination branches and tags..." -ForegroundColor Yellow
-
-$DestinationRefs = @(git ls-remote $DestinationUrl 2>&1)
-if ($LASTEXITCODE -ne 0) {
-    throw "Cannot access destination repository through Git."
-}
-
-if ($DestinationRefs.Count -gt 0) {
-    throw "Destination is not empty. Migration stopped to prevent overwriting refs."
-}
-
-Write-Host "Destination repository is empty." -ForegroundColor Green
-
-# STEP 6: Check mirror directory
-Write-Host "`nSTEP 6: Checking local mirror directory..." -ForegroundColor Yellow
-
-if (Test-Path $MirrorPath) {
-    throw "Mirror directory already exists: $MirrorPath. Inspect it before retrying."
-}
-
-# STEP 7: Clone source repository as a mirror
-Write-Host "`nSTEP 7: Cloning source repository..." -ForegroundColor Yellow
-
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch back to source account."
-}
-
-gh auth setup-git
-if ($LASTEXITCODE -ne 0) {
-    throw "Git authentication setup failed for source account."
-}
-
-git clone --mirror $SourceUrl $MirrorPath
-if ($LASTEXITCODE -ne 0) {
-    throw "Source mirror clone failed."
-}
-
-Write-Host "Source repository cloned successfully." -ForegroundColor Green
-
-# STEP 8: Push mirror to destination
-Write-Host "`nSTEP 8: Pushing repository to destination..." -ForegroundColor Yellow
-
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not switch to destination account."
-}
-
-gh auth setup-git
-if ($LASTEXITCODE -ne 0) {
-    throw "Git authentication setup failed for destination account."
-}
-
-git -C $MirrorPath push --mirror $DestinationUrl
-if ($LASTEXITCODE -ne 0) {
-    throw "Mirror push failed. Review Git output before retrying."
-}
-
-Write-Host "`n==========================================" -ForegroundColor Green
-Write-Host "     Repository Migration Completed!      " -ForegroundColor Green
-Write-Host "Source: $SourceOwner/$Repo"
-Write-Host "Destination: $DestinationOwner/$Repo"
-Write-Host "==========================================" -ForegroundColor Green

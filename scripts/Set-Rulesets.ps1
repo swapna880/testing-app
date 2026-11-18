@@ -1,263 +1,375 @@
 
 param(
     [string]$SourceOwner = "swapna880",
+    [string]$SourceRepo = "testing-app",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app"
+    [string]$DestinationRepo = "migration-automation-test",
+    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [SecureString]$SourceToken,
+    [SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "C:\GitHub-Migration-POC"
 $ExportPath = Join-Path $ProjectPath "exports\rulesets.json"
-$ReportPath = Join-Path $ProjectPath "reports\Ruleset-Migration-Report.json"
 $PayloadFolder = Join-Path $ProjectPath "exports\ruleset-payloads"
+$ReportPath = Join-Path $ProjectPath "reports\Ruleset-Migration-Report.json"
 
-New-Item -ItemType Directory -Force -Path (Split-Path $ExportPath) | Out-Null
-New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
-New-Item -ItemType Directory -Force -Path $PayloadFolder | Out-Null
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
 
-$Results = @()
-$Report = [ordered]@{
-    SourceRepository = "$SourceOwner/$Repo"
-    DestinationRepository = "$DestinationOwner/$Repo"
-    ExportStatus = "Pending"
-    DestinationStatus = "Pending"
-    MigrationStatus = "Pending"
-    TotalRulesets = 0
-    Migrated = 0
-    AlreadyPresent = 0
-    Failed = 0
-    EnforcementPreserved = "Disabled"
-    Results = @()
-    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-}
+function Convert-SecureToken {
+    param([SecureString]$SecureValue)
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " GitHub Ruleset Migration" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
-
-# STEP 1: Verify source account
-Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
-
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) { throw "Source account switch failed." }
-
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser.Trim() -ne $SourceOwner) {
-    throw "Source account verification failed."
-}
-
-# STEP 2: Export source rulesets
-Write-Host "`nSTEP 2: Exporting source rulesets..." -ForegroundColor Yellow
-
-$SourceOutput = gh api "repos/$SourceOwner/$Repo/rulesets" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "Source ruleset export failed: $($SourceOutput -join ' ')"
-}
-
-$SourceRulesets = @($SourceOutput | ConvertFrom-Json)
-
-$SourceRulesets |
-    ConvertTo-Json -Depth 30 |
-    Set-Content -Path $ExportPath -Encoding utf8
-
-$Report.ExportStatus = "Success"
-$Report.TotalRulesets = $SourceRulesets.Count
-
-Write-Host "Source rulesets exported: $($SourceRulesets.Count)" -ForegroundColor Green
-
-# STEP 3: Verify destination account
-Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
-
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) { throw "Destination account switch failed." }
-
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser.Trim() -ne $DestinationOwner) {
-    throw "Destination account verification failed."
-}
-
-# STEP 4: Verify destination repository
-Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
-
-gh api "repos/$DestinationOwner/$Repo" --silent
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository is inaccessible."
-}
-
-$Report.DestinationStatus = "Repository access verified"
-
-# STEP 5: Get existing destination rulesets
-Write-Host "`nSTEP 5: Checking existing destination rulesets..." -ForegroundColor Yellow
-
-$DestinationOutput = gh api "repos/$DestinationOwner/$Repo/rulesets" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not retrieve destination rulesets."
-}
-
-$DestinationRulesets = @($DestinationOutput | ConvertFrom-Json)
-
-# STEP 6: Migrate each ruleset
-Write-Host "`nSTEP 6: Migrating rulesets..." -ForegroundColor Yellow
-
-foreach ($SourceItem in $SourceRulesets) {
-
-    $Name = $SourceItem.name
-    Write-Host "`nProcessing: $Name" -ForegroundColor Cyan
-
-    $Result = [ordered]@{
-        Name = $Name
-        Status = "Pending"
-        DestinationId = $null
-        Verification = "Pending"
-        Details = ""
+    if ($null -eq $SecureValue) {
+        throw "A required GitHub token was not supplied."
     }
+
+    $Bstr = [IntPtr]::Zero
+    try {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
+}
+
+function Get-GitHubHeaders {
+    param([string]$Token)
+
+    return @{
+        Authorization = "Bearer $Token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+}
+
+function Invoke-GitHubApi {
+    param(
+        [string]$Uri,
+        [hashtable]$Headers,
+        [string]$Method = "GET",
+        [object]$Body
+    )
+
+    $Parameters = @{
+        Uri = $Uri
+        Headers = $Headers
+        Method = $Method
+        ErrorAction = "Stop"
+    }
+
+    if ($null -ne $Body) {
+        $Parameters.Body = ConvertTo-Json -InputObject $Body -Depth 30
+        $Parameters.ContentType = "application/json"
+    }
+
+    return Invoke-RestMethod @Parameters
+}
+
+function Get-HttpStatusCode {
+    param($ErrorRecord)
 
     try {
-        # Retrieve complete source configuration
-        gh auth switch --user $SourceOwner | Out-Null
-        $DetailOutput = gh api "repos/$SourceOwner/$Repo/rulesets/$($SourceItem.id)" 2>&1
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not retrieve source ruleset details."
-        }
-
-        $SourceDetail = $DetailOutput | ConvertFrom-Json
-
-        # Build a clean destination payload.
-        # Source IDs, node IDs, timestamps and links are excluded.
-        $Payload = [ordered]@{
-            name = $SourceDetail.name
-            target = $SourceDetail.target
-            enforcement = $SourceDetail.enforcement
-            conditions = $SourceDetail.conditions
-            rules = $SourceDetail.rules
-            bypass_actors = @($SourceDetail.bypass_actors)
-        }
-
-        $PayloadPath = Join-Path $PayloadFolder "$Name.json"
-
-        $Payload |
-            ConvertTo-Json -Depth 30 |
-            Set-Content -Path $PayloadPath -Encoding utf8
-
-        # Switch to destination
-        gh auth switch --user $DestinationOwner | Out-Null
-
-        # Check for an existing ruleset with the same name
-        $Existing = @($DestinationRulesets | Where-Object {
-            $_.name -eq $Name
-        })
-
-        if ($Existing.Count -gt 0) {
-            $DestinationId = $Existing[0].id
-            Write-Host "Already exists. Verifying existing ruleset..." -ForegroundColor Yellow
-            $Result.Status = "Already present"
-            $Report.AlreadyPresent++
-        }
-        else {
-            $CreateOutput = gh api "repos/$DestinationOwner/$Repo/rulesets" `
-                --method POST --input $PayloadPath 2>&1
-
-            if ($LASTEXITCODE -ne 0) {
-                throw "Ruleset creation failed: $($CreateOutput -join ' ')"
-            }
-
-            $Created = $CreateOutput | ConvertFrom-Json
-            $DestinationId = $Created.id
-
-            $Result.Status = "Migrated"
-            $Report.Migrated++
-            Write-Host "Created successfully. ID: $DestinationId" -ForegroundColor Green
-        }
-
-        # Verify destination ruleset details
-        $VerifyOutput = gh api "repos/$DestinationOwner/$Repo/rulesets/$DestinationId" 2>&1
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Destination ruleset verification failed."
-        }
-
-        $Verified = $VerifyOutput | ConvertFrom-Json
-
-        $Expected = [ordered]@{
-            name = $Payload.name
-            target = $Payload.target
-            enforcement = $Payload.enforcement
-            conditions = $Payload.conditions
-            rules = $Payload.rules
-            bypass_actors = $Payload.bypass_actors
-        }
-
-        $Actual = [ordered]@{
-            name = $Verified.name
-            target = $Verified.target
-            enforcement = $Verified.enforcement
-            conditions = $Verified.conditions
-            rules = $Verified.rules
-            bypass_actors = @($Verified.bypass_actors)
-        }
-
-        $ExpectedJson = ConvertTo-Json -InputObject $Expected -Depth 30 -Compress
-        $ActualJson = ConvertTo-Json -InputObject $Actual -Depth 30 -Compress
-
-        if ($ExpectedJson -ne $ActualJson) {
-            throw "Destination configuration does not match source."
-        }
-
-        $Result.DestinationId = $DestinationId
-        $Result.Verification = "Passed"
-        $Result.Details = "Configuration matches source. Enforcement preserved."
-
-        Write-Host "Verification passed." -ForegroundColor Green
+        return [int]$ErrorRecord.Exception.Response.StatusCode
     }
     catch {
-        $Result.Status = "Failed"
-        $Result.Verification = "Failed"
-        $Result.Details = $_.Exception.Message
-        $Report.Failed++
-
-        Write-Warning "$Name failed: $($_.Exception.Message)"
-    }
-
-    $Results += [PSCustomObject]$Result
-
-    # Refresh destination list for subsequent rulesets
-    gh auth switch --user $DestinationOwner | Out-Null
-    $RefreshOutput = gh api "repos/$DestinationOwner/$Repo/rulesets" 2>&1
-
-    if ($LASTEXITCODE -eq 0) {
-        $DestinationRulesets = @($RefreshOutput | ConvertFrom-Json)
+        return 0
     }
 }
 
-# STEP 7: Generate final report
-$Report.Results = $Results
-$Report.Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+function Get-RulesetPayload {
+    param($Ruleset)
 
-if ($Report.Failed -eq 0 -and
-    ($Report.Migrated + $Report.AlreadyPresent) -eq $Report.TotalRulesets) {
-    $Report.MigrationStatus = "Success"
+    return [ordered]@{
+        name = $Ruleset.name
+        target = $Ruleset.target
+        enforcement = $Ruleset.enforcement
+        conditions = $Ruleset.conditions
+        rules = $Ruleset.rules
+        bypass_actors = @($Ruleset.bypass_actors)
+    }
 }
-else {
-    $Report.MigrationStatus = "Partially completed or failed"
+
+try {
+    New-Item -ItemType Directory -Force -Path (Split-Path $ExportPath) | Out-Null
+    New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
+    New-Item -ItemType Directory -Force -Path $PayloadFolder | Out-Null
+
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    }
+
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    }
+
+    $SourcePlainToken = Convert-SecureToken $SourceToken
+    $DestinationPlainToken = Convert-SecureToken $DestinationToken
+
+    $SourceHeaders = Get-GitHubHeaders $SourcePlainToken
+    $DestinationHeaders = Get-GitHubHeaders $DestinationPlainToken
+
+    $Report = [ordered]@{
+        SourceRepository = "$SourceOwner/$SourceRepo"
+        DestinationRepository = "$DestinationOwner/$DestinationRepo"
+        SourceAccessStatus = "Pending"
+        DestinationAccessStatus = "Pending"
+        ExportStatus = "Pending"
+        MigrationStatus = "Pending"
+        TotalRulesets = 0
+        Migrated = 0
+        AlreadyPresent = 0
+        Failed = 0
+        Restricted = 0
+        Results = @()
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host " GitHub Ruleset Migration" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+
+    Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
+
+    $SourceUser = Invoke-GitHubApi `
+        -Uri "https://api.github.com/user" `
+        -Headers $SourceHeaders
+
+    if ($SourceUser.login -ne $SourceOwner) {
+        throw "Source token belongs to '$($SourceUser.login)', not '$SourceOwner'."
+    }
+
+    Write-Host "Source account verified: $($SourceUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 2: Exporting source rulesets..." -ForegroundColor Yellow
+
+    $SourceRulesets = @()
+
+    try {
+        $SourceRulesets = @(
+            Invoke-GitHubApi `
+                -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo/rulesets?per_page=100" `
+                -Headers $SourceHeaders
+        )
+
+        $Report.SourceAccessStatus = "Accessible"
+        $Report.ExportStatus = "Success"
+        $Report.TotalRulesets = $SourceRulesets.Count
+
+        $SourceRulesets |
+            ConvertTo-Json -Depth 30 |
+            Set-Content -Path $ExportPath -Encoding utf8
+
+        Write-Host "Source rulesets found: $($SourceRulesets.Count)" -ForegroundColor Green
+    }
+    catch {
+        $StatusCode = Get-HttpStatusCode $_
+
+        if ($StatusCode -eq 403) {
+            $Report.SourceAccessStatus = "Restricted (HTTP 403)"
+            $Report.ExportStatus = "Restricted"
+            $Report.MigrationStatus = "Not performed - source ruleset access restricted"
+
+            Write-Warning "GitHub denied source ruleset access (HTTP 403)."
+            Write-Warning "Check repository plan and token/API permissions."
+        }
+        else {
+            throw "Source ruleset export failed: $($_.Exception.Message)"
+        }
+    }
+
+    if ($Report.ExportStatus -eq "Restricted") {
+        $Report.Restricted = 1
+        $Report.Results = @(
+            [PSCustomObject]@{
+                Name = "Source ruleset collection"
+                Status = "Restricted"
+                Details = "Source ruleset API returned HTTP 403. No destination changes were attempted."
+            }
+        )
+
+        $Report |
+            ConvertTo-Json -Depth 30 |
+            Set-Content -Path $ReportPath -Encoding utf8
+
+        Write-Host "`nRuleset migration skipped because source access is restricted." -ForegroundColor Yellow
+        Write-Host "Report: $ReportPath"
+        return
+    }
+
+    Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
+
+    $DestinationUser = Invoke-GitHubApi `
+        -Uri "https://api.github.com/user" `
+        -Headers $DestinationHeaders
+
+    if ($DestinationUser.login -ne $DestinationOwner) {
+        throw "Destination token belongs to '$($DestinationUser.login)', not '$DestinationOwner'."
+    }
+
+    Write-Host "Destination account verified: $($DestinationUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 4: Checking destination repository..." -ForegroundColor Yellow
+
+    $DestinationRepository = Invoke-GitHubApi `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo" `
+        -Headers $DestinationHeaders
+
+    $Report.DestinationAccessStatus = "Verified"
+
+    Write-Host "Destination repository verified." -ForegroundColor Green
+
+    Write-Host "`nSTEP 5: Retrieving existing destination rulesets..." -ForegroundColor Yellow
+
+    $DestinationRulesets = @(
+        Invoke-GitHubApi `
+            -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets?per_page=100" `
+            -Headers $DestinationHeaders
+    )
+
+    $Results = @()
+
+    Write-Host "`nSTEP 6: Processing source rulesets..." -ForegroundColor Yellow
+
+    foreach ($SourceItem in $SourceRulesets) {
+
+        $Name = $SourceItem.name
+
+        $Result = [ordered]@{
+            Name = $Name
+            Status = "Pending"
+            DestinationId = $null
+            Verification = "Pending"
+            Details = ""
+        }
+
+        try {
+            Write-Host "`nProcessing: $Name" -ForegroundColor Cyan
+
+            $SourceDetail = Invoke-GitHubApi `
+                -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo/rulesets/$($SourceItem.id)" `
+                -Headers $SourceHeaders
+
+            $Payload = Get-RulesetPayload $SourceDetail
+
+            $SafeName = $Name -replace '[^\w.-]', '_'
+            $PayloadPath = Join-Path $PayloadFolder "$SafeName.json"
+
+            $Payload |
+                ConvertTo-Json -Depth 30 |
+                Set-Content -Path $PayloadPath -Encoding utf8
+
+            $Existing = @(
+                $DestinationRulesets |
+                    Where-Object { $_.name -eq $Name }
+            )
+
+            if ($Existing.Count -gt 0) {
+                $DestinationId = $Existing[0].id
+
+                Write-Host "Ruleset already exists. Checking configuration..." -ForegroundColor Yellow
+
+                $Result.Status = "Already present"
+                $Report.AlreadyPresent++
+            }
+            else {
+                $Created = Invoke-GitHubApi `
+                    -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets" `
+                    -Headers $DestinationHeaders `
+                    -Method POST `
+                    -Body $Payload
+
+                $DestinationId = $Created.id
+
+                $Result.Status = "Migrated"
+                $Report.Migrated++
+
+                Write-Host "Ruleset created. ID: $DestinationId" -ForegroundColor Green
+            }
+
+            $Verified = Invoke-GitHubApi `
+                -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets/$DestinationId" `
+                -Headers $DestinationHeaders
+
+            $ActualPayload = Get-RulesetPayload $Verified
+
+            $ExpectedJson = ConvertTo-Json -InputObject $Payload -Depth 30 -Compress
+            $ActualJson = ConvertTo-Json -InputObject $ActualPayload -Depth 30 -Compress
+
+            if ($ExpectedJson -ne $ActualJson) {
+                throw "Destination ruleset configuration does not match source."
+            }
+
+            $Result.DestinationId = $DestinationId
+            $Result.Verification = "Passed"
+            $Result.Details = "Ruleset configuration matches source, including enforcement setting."
+
+            Write-Host "Ruleset verification passed." -ForegroundColor Green
+        }
+        catch {
+            $Result.Status = "Failed"
+            $Result.Verification = "Failed"
+            $Result.Details = $_.Exception.Message
+            $Report.Failed++
+
+            Write-Warning "$Name failed: $($_.Exception.Message)"
+        }
+
+        $Results += [PSCustomObject]$Result
+
+        $DestinationRulesets = @(
+            Invoke-GitHubApi `
+                -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets?per_page=100" `
+                -Headers $DestinationHeaders
+        )
+    }
+
+    $Report.Results = $Results
+
+    if ($Report.Failed -eq 0 -and
+        ($Report.Migrated + $Report.AlreadyPresent) -eq $Report.TotalRulesets) {
+        $Report.MigrationStatus = "Success"
+    }
+    else {
+        $Report.MigrationStatus = "Partially completed or failed"
+    }
+
+    $Report.Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+
+    $Report |
+        ConvertTo-Json -Depth 30 |
+        Set-Content -Path $ReportPath -Encoding utf8
+
+    Write-Host "`n==========================================" -ForegroundColor Cyan
+    Write-Host " RULESET MIGRATION SUMMARY" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "Total rulesets: $($Report.TotalRulesets)"
+    Write-Host "Migrated: $($Report.Migrated)"
+    Write-Host "Already present: $($Report.AlreadyPresent)"
+    Write-Host "Failed: $($Report.Failed)"
+    Write-Host "Overall: $($Report.MigrationStatus)"
+    Write-Host "Report: $ReportPath"
 }
+catch {
+    Write-Host "`nRULESET MIGRATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+finally {
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
 
-$Report |
-    ConvertTo-Json -Depth 30 |
-    Set-Content -Path $ReportPath -Encoding utf8
+    if ($SourceToken) {
+        $SourceToken.Dispose()
+    }
 
-Write-Host "`n==========================================" -ForegroundColor Cyan
-Write-Host " RULESET MIGRATION SUMMARY" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "Total rulesets: $($Report.TotalRulesets)"
-Write-Host "Migrated: $($Report.Migrated)"
-Write-Host "Already present: $($Report.AlreadyPresent)"
-Write-Host "Failed: $($Report.Failed)"
-Write-Host "Overall: $($Report.MigrationStatus)"
-Write-Host "Report: $ReportPath"
-Write-Host "==========================================" -ForegroundColor Cyan
+    if ($DestinationToken) {
+        $DestinationToken.Dispose()
+    }
 
-if ($Report.Failed -gt 0) {
-    exit 1
+    [GC]::Collect()
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }

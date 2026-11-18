@@ -1,23 +1,68 @@
 
 param(
     [string]$SourceOwner = "swapna880",
+    [string]$SourceRepo = "testing-app",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app"
+    [string]$DestinationRepo = "migration-automation-test",
+    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [SecureString]$SourceToken,
+    [SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectPath = "C:\GitHub-Migration-POC"
 $ReportPath = Join-Path $ProjectPath "reports\Migration-Validation-Report.json"
 
-New-Item -ItemType Directory -Path (Split-Path $ReportPath) -Force |
-    Out-Null
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
 
-$Results = @()
+$OwnSourceToken = $false
+$OwnDestinationToken = $false
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " GitHub Repository Migration Validation" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+$Results = [System.Collections.Generic.List[object]]::new()
+
+function Convert-SecureToken {
+    param([SecureString]$SecureValue)
+
+    if ($null -eq $SecureValue) {
+        throw "A required GitHub token was not supplied."
+    }
+
+    $Bstr = [IntPtr]::Zero
+
+    try {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
+}
+
+function Get-GitHubHeaders {
+    param([string]$Token)
+
+    return @{
+        Authorization = "Bearer $Token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+}
+
+function Invoke-GitHubGet {
+    param(
+        [string]$Uri,
+        [hashtable]$Headers
+    )
+
+    return Invoke-RestMethod `
+        -Uri $Uri `
+        -Headers $Headers `
+        -Method GET `
+        -ErrorAction Stop
+}
 
 function Add-ValidationResult {
     param(
@@ -26,112 +71,41 @@ function Add-ValidationResult {
         [string]$Details
     )
 
-    $script:Results += [PSCustomObject]@{
+    $Results.Add([PSCustomObject]@{
         Check = $Check
         Status = $Status
         Details = $Details
-    }
+    })
 
-    Write-Host "$Check : $Status - $Details"
+    $Color = if ($Status -eq "Passed") { "Green" } else { "Red" }
+
+    Write-Host "$Check : $Status - $Details" -ForegroundColor $Color
 }
 
-# STEP 1: Verify source account
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Cannot switch to source account."
+function Get-GitAuthorizationHeader {
+    param([string]$Token)
+
+    $Bytes = [Text.Encoding]::UTF8.GetBytes("x-access-token:$Token")
+    $Encoded = [Convert]::ToBase64String($Bytes)
+
+    return "AUTHORIZATION: basic $Encoded"
 }
-
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser -ne $SourceOwner) {
-    throw "Source authentication failed."
-}
-
-# STEP 2: Verify source repository
-$SourceRepoJson = gh api "repos/$SourceOwner/$Repo"
-if ($LASTEXITCODE -ne 0) {
-    throw "Source repository cannot be accessed."
-}
-
-$SourceRepo = $SourceRepoJson | ConvertFrom-Json
-
-# STEP 3: Verify destination account
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Cannot switch to destination account."
-}
-
-$CurrentUser = gh api user --jq .login
-if ($LASTEXITCODE -ne 0 -or $CurrentUser -ne $DestinationOwner) {
-    throw "Destination authentication failed."
-}
-
-# STEP 4: Verify destination repository
-$DestinationRepoJson = gh api "repos/$DestinationOwner/$Repo"
-if ($LASTEXITCODE -ne 0) {
-    throw "Destination repository cannot be accessed."
-}
-
-$DestinationRepo = $DestinationRepoJson | ConvertFrom-Json
-
-Add-ValidationResult "Repository existence" "Passed" "Both repositories are accessible."
-
-# STEP 5: Compare visibility
-if ($SourceRepo.private -eq $DestinationRepo.private) {
-    Add-ValidationResult "Repository visibility" "Passed" "Visibility matches."
-}
-else {
-    Add-ValidationResult "Repository visibility" "Failed" "Visibility differs."
-}
-
-# STEP 6: Compare default branch
-if ($SourceRepo.default_branch -eq $DestinationRepo.default_branch) {
-    Add-ValidationResult "Default branch" "Passed" $SourceRepo.default_branch
-}
-else {
-    Add-ValidationResult "Default branch" "Failed" "Default branch differs."
-}
-
-# STEP 7: Compare repository settings
-$SettingNames = @(
-    "description",
-    "has_issues",
-    "has_projects",
-    "has_wiki",
-    "allow_squash_merge",
-    "allow_merge_commit",
-    "allow_rebase_merge",
-    "allow_auto_merge",
-    "delete_branch_on_merge"
-)
-
-foreach ($Setting in $SettingNames) {
-
-    $SourceValue = $SourceRepo.$Setting
-    $DestinationValue = $DestinationRepo.$Setting
-
-    if ($SourceValue -eq $DestinationValue) {
-        Add-ValidationResult "Setting: $Setting" "Passed" "Values match."
-    }
-    else {
-        Add-ValidationResult "Setting: $Setting" "Failed" "Values differ."
-    }
-}
-
-
-# STEP 8: Compare Git branches and tags, including SHA values
 
 function Get-GitRefs {
     param(
         [string]$Url,
+        [string]$Token,
         [ValidateSet("heads", "tags")]
         [string]$RefType
     )
 
+    $Header = Get-GitAuthorizationHeader -Token $Token
+
     if ($RefType -eq "heads") {
-        $Output = @(git ls-remote --heads $Url)
+        $Output = & git -c "http.extraheader=$Header" ls-remote --heads $Url
     }
     else {
-        $Output = @(git ls-remote --tags --refs $Url)
+        $Output = & git -c "http.extraheader=$Header" ls-remote --tags --refs $Url
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -141,163 +115,277 @@ function Get-GitRefs {
     $RefMap = @{}
 
     foreach ($Line in $Output) {
-        if ($Line -match '^([0-9a-f]+)\s+(.+)$') {
-            $RefMap[$Matches[2]] = $Matches[1]
+        if ($Line -match '^([0-9a-fA-F]+)\s+(.+)$') {
+            $RefMap[$Matches[2]] = $Matches[1].ToLowerInvariant()
         }
     }
 
     return $RefMap
 }
 
-# Retrieve source references
-gh auth switch --user $SourceOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to switch to source account."
-}
+function Compare-ReferenceMaps {
+    param(
+        [string]$Label,
+        [hashtable]$SourceMap,
+        [hashtable]$DestinationMap
+    )
 
-gh auth setup-git
+    $Missing = @(
+        $SourceMap.Keys |
+            Where-Object { -not $DestinationMap.ContainsKey($_) }
+    )
 
-$SourceBranchRefs = Get-GitRefs `
-    -Url "https://github.com/$SourceOwner/$Repo.git" `
-    -RefType "heads"
+    $Extra = @(
+        $DestinationMap.Keys |
+            Where-Object { -not $SourceMap.ContainsKey($_) }
+    )
 
-$SourceTagRefs = Get-GitRefs `
-    -Url "https://github.com/$SourceOwner/$Repo.git" `
-    -RefType "tags"
-
-# Retrieve destination references
-gh auth switch --user $DestinationOwner
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to switch to destination account."
-}
-
-gh auth setup-git
-
-$DestinationBranchRefs = Get-GitRefs `
-    -Url "https://github.com/$DestinationOwner/$Repo.git" `
-    -RefType "heads"
-
-$DestinationTagRefs = Get-GitRefs `
-    -Url "https://github.com/$DestinationOwner/$Repo.git" `
-    -RefType "tags"
-
-# Compare branch names
-$MissingBranches = @(
-    $SourceBranchRefs.Keys |
-    Where-Object { $_ -notin $DestinationBranchRefs.Keys }
-)
-
-$ExtraBranches = @(
-    $DestinationBranchRefs.Keys |
-    Where-Object { $_ -notin $SourceBranchRefs.Keys }
-)
-
-if ($MissingBranches.Count -eq 0 -and $ExtraBranches.Count -eq 0) {
-    Add-ValidationResult "Branch comparison" "Passed" "All branch names match."
-}
-else {
-    Add-ValidationResult "Branch comparison" "Failed" "Missing: $($MissingBranches -join ', '); Extra: $($ExtraBranches -join ', ')"
-}
-
-# Compare branch SHA values
-foreach ($Ref in $SourceBranchRefs.Keys) {
-    if ($DestinationBranchRefs.ContainsKey($Ref) -and
-        $SourceBranchRefs[$Ref] -eq $DestinationBranchRefs[$Ref]) {
-
-        Add-ValidationResult "Branch SHA: $Ref" "Passed" "Commit SHA matches."
+    if ($Missing.Count -eq 0 -and $Extra.Count -eq 0) {
+        Add-ValidationResult "$Label names" "Passed" "All names match."
     }
     else {
-        Add-ValidationResult "Branch SHA: $Ref" "Failed" "Commit SHA differs or branch is missing."
+        Add-ValidationResult "$Label names" "Failed" `
+            "Missing: $($Missing -join ', '); Extra: $($Extra -join ', ')"
+    }
+
+    foreach ($Ref in $SourceMap.Keys) {
+        if ($DestinationMap.ContainsKey($Ref) -and
+            $SourceMap[$Ref] -eq $DestinationMap[$Ref]) {
+
+            Add-ValidationResult "$Label SHA: $Ref" "Passed" "SHA matches."
+        }
+        else {
+            Add-ValidationResult "$Label SHA: $Ref" "Failed" `
+                "SHA differs or destination reference is missing."
+        }
     }
 }
 
-# Compare tag names
-$MissingTags = @(
-    $SourceTagRefs.Keys |
-    Where-Object { $_ -notin $DestinationTagRefs.Keys }
-)
+try {
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host " GitHub Repository Migration Validation" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
 
-$ExtraTags = @(
-    $DestinationTagRefs.Keys |
-    Where-Object { $_ -notin $SourceTagRefs.Keys }
-)
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Git is not installed or is not available in PATH."
+    }
 
-if ($MissingTags.Count -eq 0 -and $ExtraTags.Count -eq 0) {
-    Add-ValidationResult "Tag comparison" "Passed" "All tag names match."
-}
-else {
-    Add-ValidationResult "Tag comparison" "Failed" "Missing: $($MissingTags -join ', '); Extra: $($ExtraTags -join ', ')"
-}
+    New-Item -ItemType Directory -Path (Split-Path $ReportPath) -Force |
+        Out-Null
 
-# Compare tag SHA values
-foreach ($Ref in $SourceTagRefs.Keys) {
-    if ($DestinationTagRefs.ContainsKey($Ref) -and
-        $SourceTagRefs[$Ref] -eq $DestinationTagRefs[$Ref]) {
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+        $OwnSourceToken = $true
+    }
 
-        Add-ValidationResult "Tag SHA: $Ref" "Passed" "Tag object SHA matches."
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+        $OwnDestinationToken = $true
+    }
+
+    $SourcePlainToken = Convert-SecureToken $SourceToken
+    $DestinationPlainToken = Convert-SecureToken $DestinationToken
+
+    $SourceHeaders = Get-GitHubHeaders $SourcePlainToken
+    $DestinationHeaders = Get-GitHubHeaders $DestinationPlainToken
+
+    Write-Host "`nSTEP 1: Verifying source account..." -ForegroundColor Yellow
+
+    $SourceUser = Invoke-GitHubGet `
+        -Uri "https://api.github.com/user" `
+        -Headers $SourceHeaders
+
+    if ($SourceUser.login -ne $SourceOwner) {
+        throw "Source token belongs to '$($SourceUser.login)', not '$SourceOwner'."
+    }
+
+    Write-Host "Source account verified: $($SourceUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 2: Retrieving source repository..." -ForegroundColor Yellow
+
+    $SourceRepository = Invoke-GitHubGet `
+        -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo" `
+        -Headers $SourceHeaders
+
+    Write-Host "Source repository verified: $($SourceRepository.full_name)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 3: Verifying destination account..." -ForegroundColor Yellow
+
+    $DestinationUser = Invoke-GitHubGet `
+        -Uri "https://api.github.com/user" `
+        -Headers $DestinationHeaders
+
+    if ($DestinationUser.login -ne $DestinationOwner) {
+        throw "Destination token belongs to '$($DestinationUser.login)', not '$DestinationOwner'."
+    }
+
+    Write-Host "Destination account verified: $($DestinationUser.login)" -ForegroundColor Green
+
+    Write-Host "`nSTEP 4: Retrieving destination repository..." -ForegroundColor Yellow
+
+    $DestinationRepository = Invoke-GitHubGet `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo" `
+        -Headers $DestinationHeaders
+
+    Write-Host "Destination repository verified: $($DestinationRepository.full_name)" -ForegroundColor Green
+
+    Add-ValidationResult "Repository existence" "Passed" `
+        "Both repositories are accessible."
+
+    Write-Host "`nSTEP 5: Comparing repository visibility..." -ForegroundColor Yellow
+
+    if ($SourceRepository.private -eq $DestinationRepository.private) {
+        Add-ValidationResult "Repository visibility" "Passed" "Visibility matches."
     }
     else {
-        Add-ValidationResult "Tag SHA: $Ref" "Failed" "Tag object SHA differs or tag is missing."
-    }
-}
-
-# STEP 9: Compare commit IDs for each branch
-foreach ($Branch in $SourceBranchRefs.Keys) {
-
-    $SourceCommit = git ls-remote "https://github.com/$SourceOwner/$Repo.git" "refs/heads/$Branch" |
-        ForEach-Object { ($_ -split "\s+")[0] }
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to read source commit for branch $Branch."
+        Add-ValidationResult "Repository visibility" "Failed" `
+            "Source and destination visibility differ."
     }
 
-    $DestinationCommit = git ls-remote "https://github.com/$DestinationOwner/$Repo.git" "refs/heads/$Branch" |
-        ForEach-Object { ($_ -split "\s+")[0] }
+    Write-Host "`nSTEP 6: Comparing default branch..." -ForegroundColor Yellow
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to read destination commit for branch $Branch."
-    }
-
-    if ($SourceCommit -eq $DestinationCommit) {
-        Add-ValidationResult "Commit: $Branch" "Passed" "Commit IDs match."
+    if ($SourceRepository.default_branch -eq $DestinationRepository.default_branch) {
+        Add-ValidationResult "Default branch" "Passed" $SourceRepository.default_branch
     }
     else {
-        Add-ValidationResult "Commit: $Branch" "Failed" "Commit IDs differ."
+        Add-ValidationResult "Default branch" "Failed" `
+            "Source: $($SourceRepository.default_branch); Destination: $($DestinationRepository.default_branch)"
     }
-}
 
-# STEP 10: Generate validation report
-$Passed = @($Results | Where-Object { $_.Status -eq "Passed" }).Count
-$Failed = @($Results | Where-Object { $_.Status -eq "Failed" }).Count
+    Write-Host "`nSTEP 7: Comparing repository settings..." -ForegroundColor Yellow
 
-$FinalReport = [PSCustomObject]@{
-    SourceRepository = "$SourceOwner/$Repo"
-    DestinationRepository = "$DestinationOwner/$Repo"
-    Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    TotalChecks = $Results.Count
-    Passed = $Passed
-    Failed = $Failed
-    OverallStatus = if ($Failed -eq 0) { "Passed" } else { "Failed" }
-    Results = $Results
-}
+    $SettingNames = @(
+        "description",
+        "homepage",
+        "has_issues",
+        "has_projects",
+        "has_wiki",
+        "allow_squash_merge",
+        "allow_merge_commit",
+        "allow_rebase_merge",
+        "allow_auto_merge",
+        "delete_branch_on_merge"
+    )
 
-$FinalReport |
-    ConvertTo-Json -Depth 10 |
-    Set-Content -Path $ReportPath -Encoding utf8
+    foreach ($Setting in $SettingNames) {
 
-Write-Host "`n==========================================" -ForegroundColor Cyan
-Write-Host "Validation Summary" -ForegroundColor Cyan
-Write-Host "Passed: $Passed"
-Write-Host "Failed: $Failed"
-Write-Host "Overall: $($FinalReport.OverallStatus)"
-Write-Host "Report: $ReportPath"
-Write-Host "==========================================" -ForegroundColor Cyan
+        $SourceValue = $SourceRepository.$Setting
+        $DestinationValue = $DestinationRepository.$Setting
 
-if ($Failed -gt 0) {
-    Write-Host "Migration validation failed. Review the JSON report." -ForegroundColor Red
-    exit 1
-}
-else {
+        if ([string]$SourceValue -ceq [string]$DestinationValue) {
+            Add-ValidationResult "Setting: $Setting" "Passed" "Values match."
+        }
+        else {
+            Add-ValidationResult "Setting: $Setting" "Failed" `
+                "Source: '$SourceValue'; Destination: '$DestinationValue'"
+        }
+    }
+
+    Write-Host "`nSTEP 8: Comparing Git branches..." -ForegroundColor Yellow
+
+    $SourceUrl = "https://github.com/$SourceOwner/$SourceRepo.git"
+    $DestinationUrl = "https://github.com/$DestinationOwner/$DestinationRepo.git"
+
+    $SourceBranchRefs = Get-GitRefs `
+        -Url $SourceUrl `
+        -Token $SourcePlainToken `
+        -RefType heads
+
+    $DestinationBranchRefs = Get-GitRefs `
+        -Url $DestinationUrl `
+        -Token $DestinationPlainToken `
+        -RefType heads
+
+    Compare-ReferenceMaps `
+        -Label "Branch" `
+        -SourceMap $SourceBranchRefs `
+        -DestinationMap $DestinationBranchRefs
+
+    Write-Host "`nSTEP 9: Comparing Git tags..." -ForegroundColor Yellow
+
+    $SourceTagRefs = Get-GitRefs `
+        -Url $SourceUrl `
+        -Token $SourcePlainToken `
+        -RefType tags
+
+    $DestinationTagRefs = Get-GitRefs `
+        -Url $DestinationUrl `
+        -Token $DestinationPlainToken `
+        -RefType tags
+
+    Compare-ReferenceMaps `
+        -Label "Tag" `
+        -SourceMap $SourceTagRefs `
+        -DestinationMap $DestinationTagRefs
+
+    Write-Host "`nSTEP 10: Comparing branch commit IDs..." -ForegroundColor Yellow
+
+    foreach ($Branch in $SourceBranchRefs.Keys) {
+
+        if ($DestinationBranchRefs.ContainsKey($Branch) -and
+            $SourceBranchRefs[$Branch] -eq $DestinationBranchRefs[$Branch]) {
+
+            Add-ValidationResult "Commit: $Branch" "Passed" "Commit IDs match."
+        }
+        else {
+            Add-ValidationResult "Commit: $Branch" "Failed" `
+                "Commit IDs differ or destination branch is missing."
+        }
+    }
+
+    Write-Host "`nSTEP 11: Generating validation report..." -ForegroundColor Yellow
+
+    $Passed = @($Results | Where-Object { $_.Status -eq "Passed" }).Count
+    $Failed = @($Results | Where-Object { $_.Status -eq "Failed" }).Count
+
+    $FinalReport = [PSCustomObject]@{
+        SourceRepository = "$SourceOwner/$SourceRepo"
+        DestinationRepository = "$DestinationOwner/$DestinationRepo"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        TotalChecks = $Results.Count
+        Passed = $Passed
+        Failed = $Failed
+        OverallStatus = if ($Failed -eq 0) { "Passed" } else { "Failed" }
+        Results = @($Results)
+    }
+
+    $FinalReport |
+        ConvertTo-Json -Depth 15 |
+        Set-Content -Path $ReportPath -Encoding utf8
+
+    Write-Host "`n==========================================" -ForegroundColor Cyan
+    Write-Host " VALIDATION SUMMARY" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "Passed: $Passed"
+    Write-Host "Failed: $Failed"
+    Write-Host "Overall: $($FinalReport.OverallStatus)"
+    Write-Host "Report: $ReportPath"
+    Write-Host "==========================================" -ForegroundColor Cyan
+
+    if ($Failed -gt 0) {
+        throw "Migration validation failed. Review the JSON report."
+    }
+
     Write-Host "All migration validation checks passed." -ForegroundColor Green
-    exit 0
+}
+catch {
+    Write-Host "`nVALIDATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+finally {
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
+
+    # Dispose only tokens prompted for by this script.
+    # Tokens passed in by an orchestrator remain available to that caller.
+    if ($OwnSourceToken -and $SourceToken) {
+        $SourceToken.Dispose()
+    }
+
+    if ($OwnDestinationToken -and $DestinationToken) {
+        $DestinationToken.Dispose()
+    }
+
+    [GC]::Collect()
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }

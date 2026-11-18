@@ -1,54 +1,135 @@
 
 param(
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "testing-app",
-    [string]$Description = "Migrated repository - GitHub Migration POC"
+    [string]$Repo = "migration-automation-test",
+    [string]$Description = "Migrated repository - GitHub Migration POC",
+    [System.Security.SecureString]$DestinationToken
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "========================================"
-Write-Host "GitHub Destination Repository Creation"
-Write-Host "========================================"
+$PlainToken = $null
+$BSTR = $null
 
-# Verify destination account authentication
-gh auth switch --user $DestinationOwner
+try {
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "GITHUB DESTINATION REPOSITORY CREATION" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to switch to destination account."
-}
-
-$CurrentUser = gh api user --jq .login
-
-if ($LASTEXITCODE -ne 0 -or $CurrentUser -ne $DestinationOwner) {
-    throw "Destination account verification failed."
-}
-
-Write-Host "Authenticated account: $CurrentUser"
-
-# Check whether destination repository already exists
-gh api "repos/$DestinationOwner/$Repo" --silent 2>$null
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "Repository already exists: $DestinationOwner/$Repo" -ForegroundColor Yellow
-}
-else {
-    # Create a private repository
-    Write-Host "Creating destination repository..."
-
-    $Result = gh api user/repos `
-        -f name=$Repo `
-        -f description="$Description" `
-        -F private=true `
-        -F has_issues=true `
-        -F has_projects=true `
-        -F has_wiki=false `
-        --jq '{name: .name, full_name: .full_name, private: .private, html_url: .html_url}'
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Destination repository creation failed."
+    # Securely request destination token if not supplied.
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter Destination GitHub Token" -AsSecureString
     }
 
-    Write-Host $Result
-    Write-Host "Destination repository created successfully!" -ForegroundColor Green
+    if ($DestinationToken.Length -eq 0) {
+        throw "Destination token cannot be empty."
+    }
+
+    $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($DestinationToken)
+    $PlainToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
+
+    $Headers = @{
+        Authorization = "Bearer $PlainToken"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+
+    # STEP 1: Verify destination identity.
+    Write-Host "`nStep 1: Verifying destination account..." -ForegroundColor Cyan
+
+    $CurrentUser = Invoke-RestMethod `
+        -Uri "https://api.github.com/user" `
+        -Headers $Headers `
+        -Method Get
+
+    if ($CurrentUser.login -ne $DestinationOwner) {
+        throw "Token belongs to $($CurrentUser.login), not $DestinationOwner."
+    }
+
+    Write-Host "Destination verified: $($CurrentUser.login)" -ForegroundColor Green
+
+    # STEP 2: Check if repository already exists.
+    Write-Host "`nStep 2: Checking destination repository..." -ForegroundColor Cyan
+
+    $RepositoryUri = "https://api.github.com/repos/$DestinationOwner/$Repo"
+
+    $ExistingRepository = $null
+
+    try {
+        $ExistingRepository = Invoke-RestMethod `
+            -Uri $RepositoryUri `
+            -Headers $Headers `
+            -Method Get
+    }
+    catch {
+        $StatusCode = $null
+
+        try {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+        }
+        catch {
+            $StatusCode = $null
+        }
+
+        if ($StatusCode -ne 404) {
+            throw "Unable to check destination repository. $($_.Exception.Message)"
+        }
+    }
+
+    if ($null -ne $ExistingRepository) {
+        Write-Host "Repository already exists: $($ExistingRepository.full_name)" -ForegroundColor Yellow
+
+        [PSCustomObject]@{
+            Repository = $ExistingRepository.full_name
+            Status = "AlreadyExists"
+            Visibility = $ExistingRepository.visibility
+            Url = $ExistingRepository.html_url
+        }
+
+        return
+    }
+
+    # STEP 3: Create private repository.
+    Write-Host "`nStep 3: Creating private destination repository..." -ForegroundColor Cyan
+
+    $Body = @{
+        name = $Repo
+        description = $Description
+        private = $true
+        has_issues = $true
+        has_projects = $true
+        has_wiki = $false
+    } | ConvertTo-Json
+
+    $CreatedRepository = Invoke-RestMethod `
+        -Uri "https://api.github.com/user/repos" `
+        -Headers $Headers `
+        -Method Post `
+        -Body $Body `
+        -ContentType "application/json"
+
+    Write-Host "`nDestination repository created successfully!" -ForegroundColor Green
+
+    [PSCustomObject]@{
+        Repository = $CreatedRepository.full_name
+        Status = "Created"
+        Visibility = $CreatedRepository.visibility
+        Url = $CreatedRepository.html_url
+    }
+}
+catch {
+    Write-Host "`nREPOSITORY CREATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+finally {
+    $PlainToken = $null
+    $Headers = $null
+    $Body = $null
+    $DestinationToken = $null
+
+    if ($BSTR -ne [IntPtr]::Zero) {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+    }
+
+    Write-Host "`nDestination authentication variables cleared." -ForegroundColor DarkGray
 }
