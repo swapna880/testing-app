@@ -9,6 +9,9 @@ param(
     [SecureString]$DestinationToken
 )
 
+$OwnSourceToken = $false
+$OwnDestinationToken = $false
+
 $ErrorActionPreference = "Stop"
 
 $ExportPath = Join-Path $ProjectPath "exports\rulesets.json"
@@ -99,13 +102,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
     New-Item -ItemType Directory -Force -Path $PayloadFolder | Out-Null
 
-    if (-not $SourceToken) {
-        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
-    }
+   if (-not $SourceToken) {
+    $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $OwnSourceToken = $true
+   }
 
-    if (-not $DestinationToken) {
-        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
-    }
+   if (-not $DestinationToken) {
+    $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $OwnDestinationToken = $true
+   }
 
     $SourcePlainToken = Convert-SecureToken $SourceToken
     $DestinationPlainToken = Convert-SecureToken $DestinationToken
@@ -362,11 +367,11 @@ finally {
     $SourcePlainToken = $null
     $DestinationPlainToken = $null
 
-    if ($SourceToken) {
+    if ($OwnSourceToken -and $SourceToken) {
         $SourceToken.Dispose()
     }
 
-    if ($DestinationToken) {
+    if ($OwnDestinationToken -and $DestinationToken) {
         $DestinationToken.Dispose()
     }
 

@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$OwnDestinationToken = $false
 
 $PlainToken = $null
 $BSTR = $null
@@ -18,7 +19,8 @@ try {
 
     # Securely request destination token if not supplied.
     if (-not $DestinationToken) {
-        $DestinationToken = Read-Host "Enter Destination GitHub Token" -AsSecureString
+    $DestinationToken = Read-Host "Enter Destination GitHub Token" -AsSecureString
+    $OwnDestinationToken = $true
     }
 
     if ($DestinationToken.Length -eq 0) {
@@ -125,11 +127,16 @@ finally {
     $PlainToken = $null
     $Headers = $null
     $Body = $null
-    $DestinationToken = $null
 
     if ($BSTR -ne [IntPtr]::Zero) {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
     }
+
+    if ($OwnDestinationToken -and $DestinationToken) {
+        $DestinationToken.Dispose()
+    }
+
+    $DestinationToken = $null
 
     Write-Host "`nDestination authentication variables cleared." -ForegroundColor DarkGray
 }

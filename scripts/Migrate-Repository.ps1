@@ -2,17 +2,20 @@
 param(
     [string]$SourceOwner = "swapna880",
     [string]$DestinationOwner = "swapnakuntala",
-    [string]$Repo = "migration-automation-test",
+    [string]$SourceRepo = "testing-app",
+    [string]$DestinationRepo = "migration-automation-test",
     [string]$ProjectPath = "C:\GitHub-Migration-POC",
     [SecureString]$SourceToken,
     [SecureString]$DestinationToken
 )
+$OwnSourceToken = $false
+$OwnDestinationToken = $false
 
 $ErrorActionPreference = "Stop"
 
-$MirrorPath = Join-Path $ProjectPath "$Repo-mirror.git"
-$SourceUrl = "https://github.com/$SourceOwner/testing-app.git"
-$DestinationUrl = "https://github.com/$DestinationOwner/$Repo.git"
+$MirrorPath = Join-Path $ProjectPath "$SourceRepo-to-$DestinationRepo-mirror.git"
+$SourceUrl = "https://github.com/$SourceOwner/$SourceRepo.git"
+$DestinationUrl = "https://github.com/$DestinationOwner/$DestinationRepo.git"
 
 $SourcePlainToken = $null
 $DestinationPlainToken = $null
@@ -102,11 +105,13 @@ try {
     }
 
     if (-not $SourceToken) {
-        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $OwnSourceToken = $true
     }
 
     if (-not $DestinationToken) {
-        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $OwnDestinationToken = $true
     }
 
     $SourcePlainToken = Convert-SecureTokenToPlainText $SourceToken
@@ -129,7 +134,7 @@ try {
     }
 
     $SourceRepository = Invoke-RestMethod `
-        -Uri "https://api.github.com/repos/$SourceOwner/testing-app" `
+        -Uri "https://api.github.com/repos/$SourceOwner/$SourceRepo" `
         -Headers $SourceHeaders `
         -Method Get
 
@@ -144,18 +149,13 @@ try {
     }
 
     $DestinationRepository = Invoke-RestMethod `
-        -Uri "https://api.github.com/repos/$DestinationOwner/$Repo" `
+        -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo" `
         -Headers $DestinationHeaders `
         -Method Get
 
     Write-Host "Destination repository verified: $($DestinationRepository.full_name)" -ForegroundColor Green
 
     Write-Host "`nSTEP 4: Checking destination Git references..." -ForegroundColor Yellow
-
-    & git ls-remote --refs -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" $DestinationUrl
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cannot access destination repository through Git."
-    }
 
     $DestinationRefOutput = & git -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" ls-remote --refs $DestinationUrl
     if ($LASTEXITCODE -ne 0) {
@@ -196,7 +196,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Could not retrieve source references for final verification."
     }
-
+    if (-not $SourceRefs) {
+    throw "Source repository contains no Git references. Migration stopped."
+    }
     $DestinationRefs = & git -c "http.extraheader=$(Get-GitAuthorizationHeader $DestinationPlainToken)" ls-remote --refs $DestinationUrl
     if ($LASTEXITCODE -ne 0) {
         throw "Could not retrieve destination references for final verification."
@@ -232,8 +234,8 @@ try {
     Write-Host "`n==========================================" -ForegroundColor Green
     Write-Host "       REPOSITORY MIGRATION SUCCESS       " -ForegroundColor Green
     Write-Host "==========================================" -ForegroundColor Green
-    Write-Host "Source: $SourceOwner/testing-app"
-    Write-Host "Destination: $DestinationOwner/$Repo"
+    Write-Host "Source: $SourceOwner/$SourceRepo"
+    Write-Host "Destination: $DestinationOwner/$DestinationRepo"
     Write-Host "Verified references: $($SourceRefMap.Count)"
     Write-Host "Reference validation: PASSED"
     Write-Host "Mirror folder: $MirrorPath"
@@ -246,11 +248,11 @@ finally {
     $SourcePlainToken = $null
     $DestinationPlainToken = $null
 
-    if ($SourceToken) {
+    if ($OwnSourceToken -and $SourceToken) {
         $SourceToken.Dispose()
     }
 
-    if ($DestinationToken) {
+    if ($OwnDestinationToken -and $DestinationToken) {
         $DestinationToken.Dispose()
     }
 

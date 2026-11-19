@@ -77,9 +77,77 @@ function Add-ValidationResult {
         Details = $Details
     })
 
-    $Color = if ($Status -eq "Passed") { "Green" } else { "Red" }
+    switch ($Status) {
+        "Passed"  { $Color = "Green" }
+        "Warning" { $Color = "Yellow" }
+        default   { $Color = "Red" }
+    }
 
     Write-Host "$Check : $Status - $Details" -ForegroundColor $Color
+}
+
+function Get-BranchComparison {
+    param(
+        [string]$Branch,
+        [string]$SourceSHA,
+        [string]$DestinationSHA,
+        [hashtable]$Headers
+    )
+
+    $BaseSHA = $DestinationSHA
+    $HeadSHA = $SourceSHA
+
+    $Uri = "https://api.github.com/repos/$SourceOwner/$SourceRepo/compare/$BaseSHA...$HeadSHA"
+
+    try {
+        $Comparison = Invoke-GitHubGet -Uri $Uri -Headers $Headers
+
+        if ($Comparison.status -eq "ahead") {
+
+            Write-Host "`nSource commits missing from destination:" -ForegroundColor Yellow
+
+            foreach ($Commit in $Comparison.commits) {
+
+                Write-Host "SHA     : $($Commit.sha)"
+                Write-Host "Message : $($Commit.commit.message)"
+                Write-Host "Date    : $($Commit.commit.author.date)"
+                Write-Host "URL     : $($Commit.html_url)"
+                Write-Host "--------------------------------"
+            }
+        }
+
+        switch ($Comparison.status) {
+
+            "identical" {
+                Add-ValidationResult "Branch: $Branch" "Passed" `
+                    "Commit histories match."
+            }
+
+            "ahead" {
+                Add-ValidationResult "Branch: $Branch" "Warning" `
+                    "Source is ahead by $($Comparison.ahead_by) commits. Destination is behind."
+            }
+
+            "behind" {
+                Add-ValidationResult "Branch: $Branch" "Warning" `
+                    "Destination is ahead by $($Comparison.behind_by) commits. Source is behind."
+            }
+
+            "diverged" {
+                Add-ValidationResult "Branch: $Branch" "Failed" `
+                    "Source and destination histories have diverged. Ahead: $($Comparison.ahead_by); Behind: $($Comparison.behind_by)."
+            }
+
+            default {
+                Add-ValidationResult "Branch: $Branch" "Failed" `
+                    "Unexpected comparison status: $($Comparison.status)"
+            }
+        }
+    }
+    catch {
+        Add-ValidationResult "Branch: $Branch" "Failed" `
+            "Unable to compare commit histories: $($_.Exception.Message)"
+    }
 }
 
 function Get-GitAuthorizationHeader {
@@ -127,7 +195,8 @@ function Compare-ReferenceMaps {
     param(
         [string]$Label,
         [hashtable]$SourceMap,
-        [hashtable]$DestinationMap
+        [hashtable]$DestinationMap,
+        [switch]$SkipShaComparison
     )
 
     $Missing = @(
@@ -148,15 +217,20 @@ function Compare-ReferenceMaps {
             "Missing: $($Missing -join ', '); Extra: $($Extra -join ', ')"
     }
 
-    foreach ($Ref in $SourceMap.Keys) {
-        if ($DestinationMap.ContainsKey($Ref) -and
-            $SourceMap[$Ref] -eq $DestinationMap[$Ref]) {
+    if (-not $SkipShaComparison) {
 
-            Add-ValidationResult "$Label SHA: $Ref" "Passed" "SHA matches."
-        }
-        else {
-            Add-ValidationResult "$Label SHA: $Ref" "Failed" `
-                "SHA differs or destination reference is missing."
+        foreach ($Ref in $SourceMap.Keys) {
+
+            if ($DestinationMap.ContainsKey($Ref) -and
+                $SourceMap[$Ref] -eq $DestinationMap[$Ref]) {
+
+                Add-ValidationResult "$Label SHA: $Ref" "Passed" `
+                    "SHA matches."
+            }
+            else {
+                Add-ValidationResult "$Label SHA: $Ref" "Failed" `
+                    "SHA differs or destination reference is missing."
+            }
         }
     }
 }
@@ -269,13 +343,33 @@ try {
 
     foreach ($Setting in $SettingNames) {
 
-        $SourceValue = $SourceRepository.$Setting
-        $DestinationValue = $DestinationRepository.$Setting
+        $SourceProperty = $SourceRepository.PSObject.Properties[$Setting]
+        $DestinationProperty = $DestinationRepository.PSObject.Properties[$Setting]
+
+        if ($null -eq $SourceProperty -or $null -eq $DestinationProperty) {
+
+            Add-ValidationResult "Setting: $Setting" "Warning" `
+                "Property unavailable in source or destination API response. Comparison skipped."
+
+            continue
+        }
+
+        $SourceValue = $SourceProperty.Value
+        $DestinationValue = $DestinationProperty.Value
 
         if ([string]$SourceValue -ceq [string]$DestinationValue) {
-            Add-ValidationResult "Setting: $Setting" "Passed" "Values match."
+
+            Add-ValidationResult "Setting: $Setting" "Passed" `
+                "Values match."
+        }
+        elseif ($Setting -eq "description") {
+
+            Add-ValidationResult "Setting: $Setting" "Warning" `
+                "Descriptions are different. Source: '$SourceValue'; Destination: '$DestinationValue'."
+
         }
         else {
+
             Add-ValidationResult "Setting: $Setting" "Failed" `
                 "Source: '$SourceValue'; Destination: '$DestinationValue'"
         }
@@ -299,7 +393,8 @@ try {
     Compare-ReferenceMaps `
         -Label "Branch" `
         -SourceMap $SourceBranchRefs `
-        -DestinationMap $DestinationBranchRefs
+        -DestinationMap $DestinationBranchRefs `
+        -SkipShaComparison
 
     Write-Host "`nSTEP 9: Comparing Git tags..." -ForegroundColor Yellow
 
@@ -318,25 +413,45 @@ try {
         -SourceMap $SourceTagRefs `
         -DestinationMap $DestinationTagRefs
 
-    Write-Host "`nSTEP 10: Comparing branch commit IDs..." -ForegroundColor Yellow
+    Write-Host "`nSTEP 10: Comparing branch commit histories..." -ForegroundColor Yellow
 
     foreach ($Branch in $SourceBranchRefs.Keys) {
 
-        if ($DestinationBranchRefs.ContainsKey($Branch) -and
-            $SourceBranchRefs[$Branch] -eq $DestinationBranchRefs[$Branch]) {
+        if (-not $DestinationBranchRefs.ContainsKey($Branch)) {
 
-            Add-ValidationResult "Commit: $Branch" "Passed" "Commit IDs match."
+            Add-ValidationResult "Branch: $Branch" "Failed" `
+                "Branch is missing in destination."
+        }
+        elseif ($SourceBranchRefs[$Branch] -eq $DestinationBranchRefs[$Branch]) {
+
+            Add-ValidationResult "Branch: $Branch" "Passed" `
+                "Commit IDs match."
         }
         else {
-            Add-ValidationResult "Commit: $Branch" "Failed" `
-                "Commit IDs differ or destination branch is missing."
+
+            Get-BranchComparison `
+                -Branch $Branch `
+                -SourceSHA $SourceBranchRefs[$Branch] `
+                -DestinationSHA $DestinationBranchRefs[$Branch] `
+                -Headers $SourceHeaders
         }
     }
 
     Write-Host "`nSTEP 11: Generating validation report..." -ForegroundColor Yellow
 
     $Passed = @($Results | Where-Object { $_.Status -eq "Passed" }).Count
+    $Warnings = @($Results | Where-Object { $_.Status -eq "Warning" }).Count
     $Failed = @($Results | Where-Object { $_.Status -eq "Failed" }).Count
+
+    $OverallStatus = if ($Failed -gt 0) {
+        "Failed"
+    }
+    elseif ($Warnings -gt 0) {
+        "CompletedWithWarnings"
+    }
+    else {
+        "Passed"
+    }
 
     $FinalReport = [PSCustomObject]@{
         SourceRepository = "$SourceOwner/$SourceRepo"
@@ -344,29 +459,30 @@ try {
         Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         TotalChecks = $Results.Count
         Passed = $Passed
+        Warnings = $Warnings
         Failed = $Failed
-        OverallStatus = if ($Failed -eq 0) { "Passed" } else { "Failed" }
+        OverallStatus = $OverallStatus
         Results = @($Results)
     }
 
-    $FinalReport |
-        ConvertTo-Json -Depth 15 |
-        Set-Content -Path $ReportPath -Encoding utf8
+    $FinalReport | ConvertTo-Json -Depth 10 |
+        Set-Content -Path $ReportPath -Encoding UTF8
 
     Write-Host "`n==========================================" -ForegroundColor Cyan
     Write-Host " VALIDATION SUMMARY" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host "Passed: $Passed"
-    Write-Host "Failed: $Failed"
-    Write-Host "Overall: $($FinalReport.OverallStatus)"
-    Write-Host "Report: $ReportPath"
-    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "Passed   : $Passed" -ForegroundColor Green
+    Write-Host "Warnings : $Warnings" -ForegroundColor Yellow
+    Write-Host "Failed   : $Failed" -ForegroundColor Red
+    Write-Host "Overall  : $OverallStatus" -ForegroundColor Cyan
+    Write-Host "Report   : $ReportPath" -ForegroundColor Cyan
 
     if ($Failed -gt 0) {
         throw "Migration validation failed. Review the JSON report."
     }
 
-    Write-Host "All migration validation checks passed." -ForegroundColor Green
+    Write-Host "`nValidation completed successfully." -ForegroundColor Green
+
 }
 catch {
     Write-Host "`nVALIDATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
@@ -387,5 +503,6 @@ finally {
     }
 
     [GC]::Collect()
+
     Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }

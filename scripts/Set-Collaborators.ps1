@@ -10,6 +10,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$OwnSourceToken = $false
+$OwnDestinationToken = $false
 
 $ExportPath = Join-Path $ProjectPath "exports\collaborators.json"
 $ReportPath = Join-Path $ProjectPath "reports\Collaborator-Migration-Report.json"
@@ -83,11 +85,13 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
 
     if (-not $SourceToken) {
-        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $OwnSourceToken = $true
     }
 
     if (-not $DestinationToken) {
-        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $OwnDestinationToken = $true
     }
 
     $SourcePlainToken = Convert-SecureToken $SourceToken
@@ -243,13 +247,16 @@ finally {
     $SourcePlainToken = $null
     $DestinationPlainToken = $null
 
-    if ($SourceToken) {
+    if ($OwnSourceToken -and $SourceToken) {
         $SourceToken.Dispose()
     }
 
-    if ($DestinationToken) {
+    if ($OwnDestinationToken -and $DestinationToken) {
         $DestinationToken.Dispose()
     }
+
+    $SourceToken = $null
+    $DestinationToken = $null
 
     [GC]::Collect()
     Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray

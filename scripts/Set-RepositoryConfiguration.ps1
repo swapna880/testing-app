@@ -8,6 +8,8 @@ param(
     [SecureString]$SourceToken,
     [SecureString]$DestinationToken
 )
+$OwnSourceToken = $false
+$OwnDestinationToken = $false
 
 $ErrorActionPreference = "Stop"
 
@@ -72,11 +74,13 @@ try {
     Write-Host "==========================================" -ForegroundColor Cyan
 
     if (-not $SourceToken) {
-        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+    $OwnSourceToken = $true
     }
 
     if (-not $DestinationToken) {
-        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+    $OwnDestinationToken = $true
     }
 
     $SourcePlainToken = Convert-SecureToken $SourceToken
@@ -212,12 +216,12 @@ finally {
     $SourcePlainToken = $null
     $DestinationPlainToken = $null
 
-    if ($SourceToken) {
-        $SourceToken.Dispose()
+    if ($OwnSourceToken -and $SourceToken) {
+    $SourceToken.Dispose()
     }
 
-    if ($DestinationToken) {
-        $DestinationToken.Dispose()
+    if ($OwnDestinationToken -and $DestinationToken) {
+    $DestinationToken.Dispose()
     }
 
     [GC]::Collect()

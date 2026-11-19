@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$OwnSourceToken = $false
 
 # ------------------------------------------------------------
 # CONFIGURATION
@@ -200,7 +201,8 @@ try {
     # STEP 1: Collect source token securely.
 
     if (-not $SourceToken) {
-        $SourceToken = Read-Host "Enter Source GitHub Token" -AsSecureString
+    $SourceToken = Read-Host "Enter Source GitHub Token" -AsSecureString
+    $OwnSourceToken = $true
     }
 
     if ($SourceToken.Length -eq 0) {
@@ -352,8 +354,12 @@ catch {
 
 }
 finally {
-
     $script:PlainToken = $null
+
+    if ($OwnSourceToken -and $SourceToken) {
+        $SourceToken.Dispose()
+    }
+
     $SourceToken = $null
 
     Write-Host "`nSource authentication variables cleared from the script." -ForegroundColor DarkGray

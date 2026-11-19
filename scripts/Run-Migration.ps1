@@ -1,7 +1,7 @@
 
 # GitHub Account A to Account B - Migration Orchestrator
-# Source: swapna880/testing-app
-# Destination: swapnakuntala/testing-app
+# Initial version: Safe Assessment Mode
+# No Git push or destination configuration changes.
 
 $ErrorActionPreference = "Stop"
 
@@ -10,232 +10,261 @@ $ScriptsPath = Join-Path $ProjectPath "scripts"
 $LogPath = Join-Path $ProjectPath "logs"
 $ReportPath = Join-Path $ProjectPath "reports"
 
-$SourceOwner = "swapna880"
-$DestinationOwner = "swapnakuntala"
-$Repo = "testing-app"
+$SourceRepo = "testing-app"
+$DestinationRepo = "migration-automation-test"
 
 $Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogFile = Join-Path $LogPath "Migration-Run-$Timestamp.log"
 $ReportFile = Join-Path $ReportPath "Migration-Run-Summary-$Timestamp.json"
 
-foreach ($Folder in @($LogPath, $ReportPath)) {
-    if (-not (Test-Path $Folder)) {
-        New-Item -ItemType Directory -Path $Folder -Force | Out-Null
-    }
-}
-
-$Pwsh = (Get-Command pwsh -ErrorAction Stop).Source
-
-$MigrationScripts = @(
-    "Export-Repository.ps1",
-    "Create-Repository.ps1",
-    "Migrate-Repository.ps1",
-    "Set-RepositoryConfiguration.ps1",
-    "Set-Collaborators.ps1",
-    "Set-Rulesets.ps1",
-    "Validate-Migration.ps1"
-)
+$SourceToken = $null
+$DestinationToken = $null
+$SourcePlainToken = $null
+$DestinationPlainToken = $null
 
 $Results = @()
-$PreflightPassed = $false
-$GitMigrationStatus = "Not started"
+$OverallTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
+foreach ($Folder in @($LogPath, $ReportPath)) {
+    New-Item -ItemType Directory -Path $Folder -Force |
+        Out-Null
+}
 
 function Write-RunLog {
     param([string]$Message)
 
     $Line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Message"
+
     Add-Content -Path $LogFile -Value $Line
     Write-Host $Line
 }
 
-function Invoke-Preflight {
-    Write-RunLog "Starting preflight checks."
+function Convert-SecureToken {
+    param([SecureString]$SecureValue)
 
-    foreach ($ScriptName in $MigrationScripts) {
-        $Path = Join-Path $ScriptsPath $ScriptName
+    $BSTR = [IntPtr]::Zero
 
-        if (-not (Test-Path $Path)) {
-            throw "Required script is missing: $ScriptName"
+    try {
+        $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
+    }
+    finally {
+        if ($BSTR -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
         }
     }
-
-    gh auth switch --user $SourceOwner | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not switch to source account."
-    }
-
-    $SourceUser = gh api user --jq .login
-    if ($LASTEXITCODE -ne 0 -or $SourceUser -ne $SourceOwner) {
-        throw "Source account authentication failed."
-    }
-
-    gh auth switch --user $DestinationOwner | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not switch to destination account."
-    }
-
-    $DestinationUser = gh api user --jq .login
-    if ($LASTEXITCODE -ne 0 -or $DestinationUser -ne $DestinationOwner) {
-        throw "Destination account authentication failed."
-    }
-
-    gh api "repos/$DestinationOwner/$Repo" --silent
-    if ($LASTEXITCODE -ne 0) {
-        throw "Destination repository is unavailable."
-    }
-
-    gh auth setup-git
-
-    $DestinationRefs = @(git ls-remote "https://github.com/$DestinationOwner/$Repo.git" 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not inspect destination Git references."
-    }
-
-    if ($DestinationRefs.Count -gt 0) {
-        throw "Destination contains Git references. Migration stopped."
-    }
-
-    $MirrorPath = Join-Path $ProjectPath "$Repo-mirror.git"
-    if (Test-Path $MirrorPath) {
-        throw "Mirror directory already exists. Inspect it before proceeding."
-    }
-
-    Write-RunLog "Preflight checks passed."
 }
 
-$OverallTimer = [System.Diagnostics.Stopwatch]::StartNew()
+function Test-GitHubAccount {
+    param(
+        [string]$Token,
+        [string]$ExpectedOwner,
+        [string]$AccountLabel
+    )
 
-Write-RunLog "============================================"
-Write-RunLog "GitHub Repository Migration POC"
-Write-RunLog "Source: $SourceOwner/$Repo"
-Write-RunLog "Destination: $DestinationOwner/$Repo"
-Write-RunLog "============================================"
+    $Headers = @{
+        Authorization = "Bearer $Token"
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+
+    $User = Invoke-RestMethod `
+        -Uri "https://api.github.com/user" `
+        -Headers $Headers `
+        -Method Get `
+        -ErrorAction Stop
+
+    if ($User.login -ne $ExpectedOwner) {
+        throw "$AccountLabel token belongs to '$($User.login)', not '$ExpectedOwner'."
+    }
+
+    Write-RunLog "$AccountLabel account authenticated: $($User.login)"
+}
+
+function Invoke-MigrationStep {
+    param(
+        [string]$ScriptName,
+        [hashtable]$Parameters
+    )
+
+    $ScriptPath = Join-Path $ScriptsPath $ScriptName
+    $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-RunLog "Starting step: $ScriptName"
+
+    if (-not (Test-Path $ScriptPath)) {
+        throw "Required script not found: $ScriptPath"
+    }
+
+    try {
+        # Execute in the current PowerShell process.
+        # SecureString tokens are passed directly, not as command-line text.
+        & $ScriptPath @Parameters
+
+        $Timer.Stop()
+
+        $script:Results += [PSCustomObject]@{
+            Script = $ScriptName
+            Status = "Completed"
+            DurationSeconds = [math]::Round($Timer.Elapsed.TotalSeconds, 2)
+        }
+
+        Write-RunLog "Completed step: $ScriptName"
+    }
+    catch {
+        $Timer.Stop()
+
+        $script:Results += [PSCustomObject]@{
+            Script = $ScriptName
+            Status = "Failed"
+            DurationSeconds = [math]::Round($Timer.Elapsed.TotalSeconds, 2)
+            Error = $_.Exception.Message
+        }
+
+        Write-RunLog "FAILED: $ScriptName - $($_.Exception.Message)"
+        throw
+    }
+}
+
+$OverallStatus = "Not started"
 
 try {
-    Invoke-Preflight
-    $PreflightPassed = $true
+    Write-RunLog "=========================================="
+    Write-RunLog "GITHUB REPOSITORY MIGRATION POC"
+    Write-RunLog "MODE: SAFE ASSESSMENT"
+    Write-RunLog "=========================================="
+
+    # STEP 1: Collect four runtime inputs.
+
+    Write-Host "`nSTEP 1: Enter GitHub account details" -ForegroundColor Cyan
+
+    $SourceOwner = Read-Host "Enter SOURCE GitHub Account ID"
+    $SourceToken = Read-Host "Enter SOURCE GitHub Token" -AsSecureString
+
+    $DestinationOwner = Read-Host "Enter DESTINATION GitHub Account ID"
+    $DestinationToken = Read-Host "Enter DESTINATION GitHub Token" -AsSecureString
+
+    if ([string]::IsNullOrWhiteSpace($SourceOwner) -or
+        [string]::IsNullOrWhiteSpace($DestinationOwner) -or
+        $SourceToken.Length -eq 0 -or
+        $DestinationToken.Length -eq 0) {
+        throw "Account IDs and tokens are required."
+    }
+
+    Write-RunLog "Source repository: $SourceOwner/$SourceRepo"
+    Write-RunLog "Destination repository: $DestinationOwner/$DestinationRepo"
+
+    # STEP 2: Authenticate both accounts independently.
+
+    Write-Host "`nSTEP 2: Authenticating GitHub accounts" -ForegroundColor Cyan
+
+    $SourcePlainToken = Convert-SecureToken $SourceToken
+    $DestinationPlainToken = Convert-SecureToken $DestinationToken
+
+    Test-GitHubAccount `
+        -Token $SourcePlainToken `
+        -ExpectedOwner $SourceOwner `
+        -AccountLabel "Source"
+
+    Test-GitHubAccount `
+        -Token $DestinationPlainToken `
+        -ExpectedOwner $DestinationOwner `
+        -AccountLabel "Destination"
+
+    # STEP 3: Execute safe assessment modules.
+
+    Write-Host "`nSTEP 3: Starting safe assessment modules" -ForegroundColor Cyan
+
+    Invoke-MigrationStep `
+        -ScriptName "Export-Repository.ps1" `
+        -Parameters @{
+            Owner = $SourceOwner
+            Repo = $SourceRepo
+            SourceToken = $SourceToken
+        }
+
+    Invoke-MigrationStep `
+        -ScriptName "Set-Collaborators.ps1" `
+        -Parameters @{
+            SourceOwner = $SourceOwner
+            SourceRepo = $SourceRepo
+            DestinationOwner = $DestinationOwner
+            DestinationRepo = $DestinationRepo
+            ProjectPath = $ProjectPath
+            SourceToken = $SourceToken
+            DestinationToken = $DestinationToken
+        }
+
+    Invoke-MigrationStep `
+        -ScriptName "Validate-Migration.ps1" `
+        -Parameters @{
+            SourceOwner = $SourceOwner
+            SourceRepo = $SourceRepo
+            DestinationOwner = $DestinationOwner
+            DestinationRepo = $DestinationRepo
+            ProjectPath = $ProjectPath
+            SourceToken = $SourceToken
+            DestinationToken = $DestinationToken
+        }
+
+    $OverallStatus = "Safe assessment completed"
+
+    Write-RunLog "All safe assessment modules completed."
 }
 catch {
-    Write-RunLog "PREFLIGHT FAILED: $($_.Exception.Message)"
+    $OverallStatus = "Failed"
+    Write-RunLog "PROCESS FAILED: $($_.Exception.Message)"
 }
+finally {
+    # Clear temporary token strings and dispose of secure inputs.
+    $SourcePlainToken = $null
+    $DestinationPlainToken = $null
 
-if ($PreflightPassed) {
-
-    foreach ($ScriptName in $MigrationScripts) {
-
-        $ScriptFile = Join-Path $ScriptsPath $ScriptName
-        $Timer = [System.Diagnostics.Stopwatch]::StartNew()
-
-        Write-RunLog "Starting $ScriptName"
-
-        try {
-            # Run each script in a separate PowerShell process.
-            # Capture output and exit code independently.
-            $Output = & $Pwsh -NoProfile -File $ScriptFile 2>&1
-            $ExitCode = $LASTEXITCODE
-
-            $Timer.Stop()
-            $OutputText = $Output | Out-String
-
-            Add-Content -Path $LogFile -Value $OutputText
-
-            if ($ExitCode -ne 0) {
-                throw "Child script returned exit code $ExitCode."
-            }
-
-            $Status = "Executed successfully"
-
-            if ($ScriptName -eq "Migrate-Repository.ps1") {
-                $GitMigrationStatus = "Push command completed; pending validation"
-            }
-
-            if ($ScriptName -eq "Set-Collaborators.ps1") {
-                $Status = "Assessment executed; check report for unmigrated collaborators"
-            }
-
-            if ($ScriptName -eq "Set-Rulesets.ps1") {
-                $Status = "Assessment executed; check report for plan restrictions"
-            }
-
-            if ($ScriptName -eq "Validate-Migration.ps1") {
-                $Status = "Validation script executed; inspect validation report"
-            }
-
-            $Results += [PSCustomObject]@{
-                Script = $ScriptName
-                Status = $Status
-                DurationSeconds = [math]::Round($Timer.Elapsed.TotalSeconds, 2)
-            }
-
-            Write-RunLog "$ScriptName completed."
-        }
-        catch {
-            $Timer.Stop()
-
-            $Results += [PSCustomObject]@{
-                Script = $ScriptName
-                Status = "Failed: $($_.Exception.Message)"
-                DurationSeconds = [math]::Round($Timer.Elapsed.TotalSeconds, 2)
-            }
-
-            Write-RunLog "FAILED: $ScriptName - $($_.Exception.Message)"
-            Write-RunLog "Stopping further execution."
-            break
-        }
+    if ($SourceToken) {
+        $SourceToken.Dispose()
     }
+
+    if ($DestinationToken) {
+        $DestinationToken.Dispose()
+    }
+
+    $OverallTimer.Stop()
+
+    $Summary = [PSCustomObject]@{
+        SourceRepository = if ($SourceOwner) {
+            "$SourceOwner/$SourceRepo"
+        } else {
+            $null
+        }
+        DestinationRepository = if ($DestinationOwner) {
+            "$DestinationOwner/$DestinationRepo"
+        } else {
+            $null
+        }
+        ExecutionMode = "Safe Assessment"
+        OverallStatus = $OverallStatus
+        TotalDurationSeconds = [math]::Round($OverallTimer.Elapsed.TotalSeconds, 2)
+        ExecutionDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        ScriptResults = @($Results)
+        Notes = @(
+            "No Git mirror push was performed.",
+            "No destination repository settings were changed.",
+            "No destination rulesets were created or modified.",
+            "External collaborator invitations were not performed.",
+            "Review Migration-Validation-Report.json for validation results."
+        )
+    }
+
+    $Summary |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -Path $ReportFile -Encoding utf8
+
+    Write-RunLog "=========================================="
+    Write-RunLog "MIGRATION POC SUMMARY"
+    Write-RunLog "Overall status: $OverallStatus"
+    Write-RunLog "Report: $ReportFile"
+    Write-RunLog "Log: $LogFile"
+    Write-RunLog "=========================================="
+
+    Write-Host "`nAuthentication variables cleared." -ForegroundColor DarkGray
 }
-
-$OverallTimer.Stop()
-
-$FailureCount = @(
-    $Results | Where-Object { $_.Status -like "Failed:*" }
-).Count
-
-$ValidationExecuted = @(
-    $Results | Where-Object { $_.Script -eq "Validate-Migration.ps1" }
-).Count -gt 0
-
-if (-not $PreflightPassed) {
-    $OverallStatus = "Stopped - Preflight failed"
-}
-elseif ($FailureCount -gt 0) {
-    $OverallStatus = "Incomplete - One or more scripts failed"
-}
-elseif ($ValidationExecuted) {
-    $OverallStatus = "Execution completed - Review validation and configuration reports"
-}
-else {
-    $OverallStatus = "Incomplete - Review skipped steps"
-}
-
-$Summary = [PSCustomObject]@{
-    SourceRepository = "$SourceOwner/$Repo"
-    DestinationRepository = "$DestinationOwner/$Repo"
-    OverallStatus = $OverallStatus
-    PreflightStatus = if ($PreflightPassed) { "Passed" } else { "Failed" }
-    GitMigrationStatus = $GitMigrationStatus
-    TotalDurationSeconds = [math]::Round($OverallTimer.Elapsed.TotalSeconds, 2)
-    TotalDurationMinutes = [math]::Round($OverallTimer.Elapsed.TotalMinutes, 2)
-    ExecutionDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    ScriptResults = $Results
-    Notes = @(
-        "Review Migration-Validation-Report.json for branch and commit validation.",
-        "Review Collaborator-Migration-Report.json for access mapping.",
-        "Review Ruleset-Migration-Report.json for ruleset restrictions.",
-        "Git mirror migration does not migrate issues, pull requests, or discussions.",
-        "GitHub secrets must be recreated securely at the destination."
-    )
-}
-
-$Summary | ConvertTo-Json -Depth 6 | Set-Content -Path $ReportFile
-
-Write-RunLog "============================================"
-Write-RunLog "Migration execution summary"
-Write-RunLog "Overall status: $OverallStatus"
-Write-RunLog "Total duration: $($Summary.TotalDurationMinutes) minutes"
-Write-RunLog "Report: $ReportFile"
-Write-RunLog "Log: $LogFile"
-
-$Results | Format-Table Script, Status, DurationSeconds -AutoSize
-
-Write-Host "`nReview the generated reports before declaring migration successful."
