@@ -4,14 +4,13 @@ param(
     [string]$SourceRepo = "testing-app",
     [string]$DestinationOwner = "swapnakuntala",
     [string]$DestinationRepo = "migration-automation-test",
-    [string]$ProjectPath = "C:\GitHub-Migration-POC",
+    [string]$ProjectPath = "C:\github-migration\post-migration-validation",
     [SecureString]$SourceToken,
     [SecureString]$DestinationToken
 )
 
 $OwnSourceToken = $false
 $OwnDestinationToken = $false
-
 $ErrorActionPreference = "Stop"
 
 $ExportPath = Join-Path $ProjectPath "exports\rulesets.json"
@@ -102,15 +101,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path $ReportPath) | Out-Null
     New-Item -ItemType Directory -Force -Path $PayloadFolder | Out-Null
 
-   if (-not $SourceToken) {
-    $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
-    $OwnSourceToken = $true
-   }
+    if (-not $SourceToken) {
+        $SourceToken = Read-Host "Enter SOURCE GitHub token" -AsSecureString
+        $OwnSourceToken = $true
+    }
 
-   if (-not $DestinationToken) {
-    $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
-    $OwnDestinationToken = $true
-   }
+    if (-not $DestinationToken) {
+        $DestinationToken = Read-Host "Enter DESTINATION GitHub token" -AsSecureString
+        $OwnDestinationToken = $true
+    }
 
     $SourcePlainToken = Convert-SecureToken $SourceToken
     $DestinationPlainToken = Convert-SecureToken $DestinationToken
@@ -163,13 +162,33 @@ try {
 
         $Report.SourceAccessStatus = "Accessible"
         $Report.ExportStatus = "Success"
-        $Report.TotalRulesets = $SourceRulesets.Count
 
         $SourceRulesets |
             ConvertTo-Json -Depth 30 |
             Set-Content -Path $ExportPath -Encoding utf8
 
+        # Reload exported JSON as separate ruleset objects.
+        $ExportedRulesets = Get-Content -Path $ExportPath -Raw | ConvertFrom-Json
+        $SourceRulesets = @($ExportedRulesets | ForEach-Object { $_ })
+
+        if ($SourceRulesets.Count -eq 0) {
+            throw "The exported ruleset file contains no rulesets."
+        }
+
+        foreach ($SourceItem in $SourceRulesets) {
+            if ($SourceItem.name -is [array]) {
+                throw "Invalid ruleset structure: a ruleset name contains multiple values."
+            }
+        }
+
+        $Report.TotalRulesets = $SourceRulesets.Count
+
+        # Remove stale payload files from previous runs.
+        Get-ChildItem -Path $PayloadFolder -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+
         Write-Host "Source rulesets found: $($SourceRulesets.Count)" -ForegroundColor Green
+        Write-Host "Rulesets to process: $($SourceRulesets.name -join ', ')" -ForegroundColor Cyan
     }
     catch {
         $StatusCode = Get-HttpStatusCode $_
@@ -230,11 +249,40 @@ try {
 
     Write-Host "`nSTEP 5: Retrieving existing destination rulesets..." -ForegroundColor Yellow
 
-    $DestinationRulesets = @(
-        Invoke-GitHubApi `
-            -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets?per_page=100" `
-            -Headers $DestinationHeaders
-    )
+    try {
+        $DestinationRulesets = @(
+            Invoke-GitHubApi `
+                -Uri "https://api.github.com/repos/$DestinationOwner/$DestinationRepo/rulesets?per_page=100" `
+                -Headers $DestinationHeaders
+        )
+    }
+    catch {
+        $StatusCode = Get-HttpStatusCode $_
+
+        if ($StatusCode -eq 403) {
+            $Report.DestinationAccessStatus = "Restricted (HTTP 403)"
+            $Report.Restricted = 1
+            $Report.MigrationStatus = "Not performed - destination ruleset access restricted"
+
+            $Report.Results = @(
+                [PSCustomObject]@{
+                    Name = "Destination ruleset collection"
+                    Status = "Restricted"
+                    Details = "GitHub denied destination ruleset access (HTTP 403). No destination rulesets were changed."
+                }
+            )
+
+            $Report |
+                ConvertTo-Json -Depth 30 |
+                Set-Content -Path $ReportPath -Encoding utf8
+
+            Write-Warning "Destination ruleset access is restricted (HTTP 403). Ruleset creation was skipped."
+            Write-Host "Report: $ReportPath"
+            return
+        }
+
+        throw
+    }
 
     $Results = @()
 
@@ -318,10 +366,18 @@ try {
         catch {
             $Result.Status = "Failed"
             $Result.Verification = "Failed"
-            $Result.Details = $_.Exception.Message
+
+            # Capture GitHub's detailed API response, including HTTP 422 reasons.
+            $GitHubError = $_.ErrorDetails.Message
+
+            if ([string]::IsNullOrWhiteSpace($GitHubError)) {
+                $GitHubError = $_.Exception.Message
+            }
+
+            $Result.Details = $GitHubError
             $Report.Failed++
 
-            Write-Warning "$Name failed: $($_.Exception.Message)"
+            Write-Warning "$Name failed: $GitHubError"
         }
 
         $Results += [PSCustomObject]$Result
